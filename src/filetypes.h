@@ -36,6 +36,8 @@
 #include "ff.h"
 
 #define FS_MAX_DEPTH	(10)
+#define TYPE_BASE_MASK    (31)
+#define TYPE_FLAG_PATCHED (32)
 /* rely on optimization to reduce every occurrence to the same location. */
 #define SYS_DIR_NAME	((const char*)"sd2snes")
 typedef enum {

@@ -234,6 +234,175 @@ uint16_t sram_writeblock(void* buf, uint32_t addr, uint16_t size) {
 }
 
 char current_filename[258];
+
+#define IPS_PATCH_CHUNK_SIZE  (64)
+
+static uint8_t build_sidecar_filename(char *dst, size_t dstsize, const uint8_t *filename, const char *extension) {
+  int written;
+  char *dot;
+
+  written = snprintf(dst, dstsize, "%s", filename);
+  if(written < 0 || (size_t)written >= dstsize) {
+    return 0;
+  }
+  dot = strrchr(dst, '.');
+  if(dot == NULL) {
+    return 0;
+  }
+  written = snprintf(dot, dstsize - (size_t)(dot - dst), "%s", extension);
+  return written > 0 && (size_t)written < (dstsize - (size_t)(dot - dst));
+}
+
+static uint8_t rom_supports_ips_patch(const uint8_t *filename) {
+  const char *ext = strrchr((const char*)filename, '.');
+
+  if(ext == NULL) {
+    return 0;
+  }
+  ext++;
+  return !strcasecmp(ext, "SMC")
+      || !strcasecmp(ext, "SFC")
+      || !strcasecmp(ext, "FIG")
+      || !strcasecmp(ext, "SWC");
+}
+
+static uint8_t ips_read_exact(void *buf, UINT size) {
+  UINT bytes_read = 0;
+
+  file_res = f_read(&file_handle, buf, size, &bytes_read);
+  return file_res == FR_OK && bytes_read == size;
+}
+
+static uint8_t apply_ips_patch_file(const char *ips_filename, uint32_t rom_base_addr, uint32_t rom_size) {
+  uint8_t buf[IPS_PATCH_CHUNK_SIZE];
+  uint8_t header[5];
+  uint32_t patch_count = 0;
+
+  file_open((const uint8_t*)ips_filename, FA_READ);
+  if(file_res) {
+    return 0;
+  }
+  if(!ips_read_exact(header, sizeof(header)) || memcmp(header, "PATCH", sizeof(header))) {
+    printf("Invalid IPS header in %s\n", ips_filename);
+    file_close();
+    file_res = FR_INVALID_OBJECT;
+    return 0;
+  }
+
+  for(;;) {
+    uint8_t record_header[3];
+    uint8_t sizebuf[2];
+    uint32_t patch_offset;
+    uint32_t target_addr;
+    uint32_t remain;
+
+    if(!ips_read_exact(record_header, sizeof(record_header))) {
+      printf("Unexpected EOF in %s\n", ips_filename);
+      file_close();
+      file_res = FR_INVALID_OBJECT;
+      return 0;
+    }
+    if(!memcmp(record_header, "EOF", sizeof(record_header))) {
+      break;
+    }
+
+    patch_offset = ((uint32_t)record_header[0] << 16)
+                 | ((uint32_t)record_header[1] << 8)
+                 |  (uint32_t)record_header[2];
+    if(!ips_read_exact(sizebuf, sizeof(sizebuf))) {
+      printf("Missing IPS size in %s\n", ips_filename);
+      file_close();
+      file_res = FR_INVALID_OBJECT;
+      return 0;
+    }
+
+    remain = ((uint32_t)sizebuf[0] << 8) | (uint32_t)sizebuf[1];
+    target_addr = rom_base_addr + patch_offset;
+
+    if(remain == 0) {
+      uint8_t rlebuf[3];
+
+      if(!ips_read_exact(rlebuf, sizeof(rlebuf))) {
+        printf("Missing IPS RLE payload in %s\n", ips_filename);
+        file_close();
+        file_res = FR_INVALID_OBJECT;
+        return 0;
+      }
+      remain = ((uint32_t)rlebuf[0] << 8) | (uint32_t)rlebuf[1];
+      if(remain > rom_size || patch_offset > rom_size - remain) {
+        printf("IPS RLE record exceeds ROM size in %s\n", ips_filename);
+        file_close();
+        file_res = FR_INVALID_OBJECT;
+        return 0;
+      }
+      memset(buf, rlebuf[2], sizeof(buf));
+      while(remain) {
+        uint16_t copy = remain > sizeof(buf) ? sizeof(buf) : remain;
+        sram_writeblock(buf, target_addr, copy);
+        target_addr += copy;
+        remain -= copy;
+      }
+    } else {
+      if(remain > rom_size || patch_offset > rom_size - remain) {
+        printf("IPS record exceeds ROM size in %s\n", ips_filename);
+        file_close();
+        file_res = FR_INVALID_OBJECT;
+        return 0;
+      }
+      while(remain) {
+        UINT copy = remain > sizeof(buf) ? sizeof(buf) : remain;
+        if(!ips_read_exact(buf, copy)) {
+          printf("Unexpected EOF in IPS data %s\n", ips_filename);
+          file_close();
+          file_res = FR_INVALID_OBJECT;
+          return 0;
+        }
+        sram_writeblock(buf, target_addr, copy);
+        target_addr += copy;
+        remain -= copy;
+      }
+    }
+    patch_count++;
+  }
+
+  file_close();
+  if(file_res) {
+    return 0;
+  }
+  printf("Applied %lu IPS records from %s\n", patch_count, ips_filename);
+  return 1;
+}
+
+static uint8_t auto_apply_ips_patch(uint8_t *romfilename, uint32_t base_addr, DWORD filesize, uint8_t is_menu) {
+  FILINFO patch_info;
+  char ips_filename[258];
+  uint32_t rom_size;
+
+  if(is_menu || romprops.has_combo || romprops.mapper_id == 3 || sgb_romprops.has_sgb || !rom_supports_ips_patch(romfilename)) {
+    return 1;
+  }
+  if(!build_sidecar_filename(ips_filename, sizeof(ips_filename), romfilename, ".ips")) {
+    file_res = FR_OK;
+    return 1;
+  }
+
+  patch_info.lfname = NULL;
+  file_res = f_stat((TCHAR*)ips_filename, &patch_info);
+  if(file_res == FR_NO_FILE) {
+    file_res = FR_OK;
+    return 1;
+  }
+  if(file_res != FR_OK || (patch_info.fattrib & AM_DIR)) {
+    if(file_res == FR_OK) {
+      file_res = FR_INVALID_NAME;
+    }
+    return 0;
+  }
+
+  rom_size = filesize - romprops.offset;
+  return apply_ips_patch_file(ips_filename, base_addr + romprops.load_address, rom_size);
+}
+
 uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   UINT bytes_read;
   DWORD filesize;
@@ -521,6 +690,10 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
 
     // enable use of the DMA unit
     romprops.fpga_features |= FEAT_DMA1;
+  }
+
+  if(!auto_apply_ips_patch(filename, base_addr, filesize, is_menu)) {
+    return 0;
   }
 
 //printf("%04lx\n", romprops.header_address + ((void*)&romprops.header.vect_irq16 - (void*)&romprops.header));

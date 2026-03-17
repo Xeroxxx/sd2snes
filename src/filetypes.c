@@ -41,6 +41,49 @@
 
 extern cfg_t CFG;
 
+static uint8_t build_sidecar_filename(char *dst, size_t dstsize, const uint8_t *path, const TCHAR *filename, const char *extension) {
+  int written;
+  char *dot;
+
+  written = snprintf(dst, dstsize, "%s%s%s", path, strcmp((const char*)path, "/") ? "/" : "", filename);
+  if(written < 0 || (size_t)written >= dstsize) {
+    return 0;
+  }
+  dot = strrchr(dst, '.');
+  if(dot == NULL) {
+    return 0;
+  }
+  written = snprintf(dot, dstsize - (size_t)(dot - dst), "%s", extension);
+  return written > 0 && (size_t)written < (dstsize - (size_t)(dot - dst));
+}
+
+static uint8_t rom_supports_ips_patch(const TCHAR *filename) {
+  const char *ext = strrchr((const char*)filename, '.');
+
+  if(ext == NULL) {
+    return 0;
+  }
+  ext++;
+  return !strcasecmp(ext, "SMC")
+      || !strcasecmp(ext, "SFC")
+      || !strcasecmp(ext, "FIG")
+      || !strcasecmp(ext, "SWC");
+}
+
+static uint8_t rom_has_ips_patch(const uint8_t *path, const TCHAR *filename) {
+  FILINFO patch_info;
+  char ipsfile[256];
+
+  if(!rom_supports_ips_patch(filename)) {
+    return 0;
+  }
+  if(!build_sidecar_filename(ipsfile, sizeof(ipsfile), path, filename, ".ips")) {
+    return 0;
+  }
+  patch_info.lfname = NULL;
+  return f_stat((TCHAR*)ipsfile, &patch_info) == FR_OK && !(patch_info.fattrib & AM_DIR);
+}
+
 /*
  * directory format:
  *  I. Pointer tables
@@ -70,6 +113,7 @@ printf("opendir res=%d\n", res);
   uint16_t numentries = 0;
   int ticks=getticks();
   SNES_FTYPE type;
+  uint8_t entry_type;
 printf("start\n");
   if (res == FR_OK) {
     for (;;) {
@@ -85,6 +129,7 @@ printf("start\n");
           case TYPE_PARENT:
             /* omit entries with hidden or system attribute */
             if(fno.fattrib & (AM_HID | AM_SYS)) continue;
+            entry_type = type;
             if(fno.fattrib & AM_DIR) {
               /* omit dot directories except '..' */
               if(fn[0]=='.' && fn[1]!='.') continue;
@@ -93,6 +138,9 @@ printf("start\n");
               snprintf(buf, sizeof(buf), " <dir>");
             } else {
               if(fn[0]=='.') continue; /* omit dot files */
+              if(type == TYPE_ROM && rom_has_ips_patch(path, fn)) {
+                entry_type |= TYPE_FLAG_PATCHED;
+              }
               make_filesize_string(buf, fno.fsize);
               if(CFG.hide_extensions) {
                 *(strrchr(fn, '.')) = 1;
@@ -109,7 +157,7 @@ printf("start\n");
             /* write file name string (leaf) */
             sram_writeblock(fn, file_tbl_off+6, fnlen+1);
             /* link file string entry in directory table */
-            sram_writelong((file_tbl_off-SRAM_MENU_ADDR) | ((uint32_t)type << 24), ptr_tbl_off);
+            sram_writelong((file_tbl_off-SRAM_MENU_ADDR) | ((uint32_t)entry_type << 24), ptr_tbl_off);
             file_tbl_off += fnlen+7;
             ptr_tbl_off += 4;
             numentries++;

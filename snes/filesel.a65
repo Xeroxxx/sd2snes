@@ -274,6 +274,9 @@ dirent_is_dir
   bra dirent_type_cont
 dirent_is_file
   lda @dirent_type
+  and #TYPE_FLAG_PATCHED
+  bne dirent_is_patched_rom
+  lda @dirent_type
   and #$00ff
   cmp #$0001    ; SMC -> palette 0 (white)
   bne +
@@ -284,9 +287,8 @@ dirent_is_file
   bne +
   lda #$0002
   bra dirent_type_cont
-  cmp #TYPE_IPS ; IPS -> palette 2 (green)
-  bne +
-  lda #$0002
+dirent_is_patched_rom
+  lda #$0002    ; patched ROM -> palette 2 (green)
   bra dirent_type_cont
 +
   lda #$0000    ; default -> palette 0
@@ -563,6 +565,7 @@ select_item:
   iny
   iny
   lda [dirptr_addr], y
+  and #TYPE_BASE_MASK
   cmp #TYPE_ROM
   beq sel_is_file
   cmp #TYPE_SPC
@@ -798,6 +801,7 @@ open_context_menu:
   iny
   iny
   lda [dirptr_addr], y
+  and #TYPE_BASE_MASK
   cmp #TYPE_ROM
   beq ctx_is_file
   cmp #TYPE_SPC
