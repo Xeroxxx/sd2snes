@@ -235,6 +235,11 @@ uint16_t sram_writeblock(void* buf, uint32_t addr, uint16_t size) {
 
 char current_filename[258];
 
+/* CRC32 of the active IPS patch file; 0 means no patch is in use.
+ * Set before migrate_and_load_srm() so that both load and save use
+ * the same suffixed filename: <basename>-<crc32hex>.srm             */
+static uint32_t ips_patch_crc32 = 0;
+
 #define IPS_PATCH_CHUNK_SIZE  (64)
 
 static uint8_t build_sidecar_filename(char *dst, size_t dstsize, const uint8_t *filename, const char *extension) {
@@ -373,6 +378,66 @@ static uint8_t apply_ips_patch_file(const char *ips_filename, uint32_t rom_base_
   return 1;
 }
 
+/* Compute the CRC32 of the IPS sidecar file (if present and applicable)
+ * and store it in ips_patch_crc32.  Must be called before
+ * migrate_and_load_srm() so the save filename already reflects the patch. */
+static void calc_ips_patch_crc32(uint8_t *romfilename, uint8_t is_menu) {
+  FILINFO patch_info;
+  char ips_filename[258];
+  uint8_t buf[64];
+  UINT bytes_read;
+  uint32_t crc;
+
+  ips_patch_crc32 = 0;
+  if(is_menu || romprops.has_combo || romprops.mapper_id == 3
+     || sgb_romprops.has_sgb || !rom_supports_ips_patch(romfilename)) {
+    return;
+  }
+  if(!build_sidecar_filename(ips_filename, sizeof(ips_filename), romfilename, ".ips")) {
+    return;
+  }
+  patch_info.lfname = NULL;
+  file_res = f_stat((TCHAR*)ips_filename, &patch_info);
+  if(file_res != FR_OK || (patch_info.fattrib & AM_DIR)) {
+    file_res = FR_OK;
+    return;
+  }
+  file_open((const uint8_t*)ips_filename, FA_READ);
+  if(file_res) {
+    file_res = FR_OK;
+    return;
+  }
+  crc = crc32_init();
+  for(;;) {
+    file_res = f_read(&file_handle, buf, sizeof(buf), &bytes_read);
+    if(file_res || !bytes_read) break;
+    for(UINT i = 0; i < bytes_read; i++) {
+      crc = crc32_update(crc, buf[i]);
+    }
+  }
+  file_close();
+  file_res = FR_OK;
+  ips_patch_crc32 = crc32_finalize(crc);
+  printf("IPS patch CRC32: %08lx\n", (unsigned long)ips_patch_crc32);
+}
+
+/* Append the IPS patch CRC32 hex suffix to an already-built .srm path.
+ * Turns "/sd2snes/saves/ROM1.srm" into "/sd2snes/saves/ROM1-aabbccdd.srm".
+ * Does nothing when ips_patch_crc32 == 0 (no active patch).           */
+static void append_ips_crc_to_srmpath(char *srmfile, size_t srmfile_size) {
+  char *dot;
+  size_t prefix_len;
+
+  if(ips_patch_crc32 == 0) return;
+  dot = strrchr(srmfile, '.');
+  if(dot == NULL) return;
+  prefix_len = (size_t)(dot - srmfile);
+  /* "-XXXXXXXX.srm" is 14 chars; need room for prefix + 14 + NUL */
+  if(prefix_len + 14 < srmfile_size) {
+    snprintf(dot, srmfile_size - prefix_len, "-%08lx.srm", (unsigned long)ips_patch_crc32);
+  }
+}
+
 static uint8_t auto_apply_ips_patch(uint8_t *romfilename, uint32_t base_addr, DWORD filesize, uint8_t is_menu) {
   FILINFO patch_info;
   char ips_filename[258];
@@ -399,7 +464,7 @@ static uint8_t auto_apply_ips_patch(uint8_t *romfilename, uint32_t base_addr, DW
     return 0;
   }
 
-  rom_size = filesize - romprops.offset;
+  rom_size = romprops.romsize_bytes;  /* use SRAM-allocated size, not disk size */
   return apply_ips_patch_file(ips_filename, base_addr + romprops.load_address, rom_size);
 }
 
@@ -606,6 +671,9 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   readled(0);
 
   printf("gsu=%x sa1=%x srambase=%lx sramsize=%lx\n", romprops.has_gsu, romprops.has_sa1, romprops.srambase, romprops.sramsize_bytes);
+  /* Determine IPS patch CRC32 before loading the save so that the
+   * save filename already uses the patch-specific suffix.          */
+  calc_ips_patch_crc32(filename, is_menu);
   if(flags & LOADROM_WITH_SRAM) {
     if(romprops.ramsize_bytes) {
       // powerslide relies on the init value to be 00.
@@ -847,18 +915,26 @@ uint32_t load_sram_offload(uint8_t* filename, uint32_t base_addr, uint8_t flags)
 uint32_t migrate_and_load_srm(uint8_t* filename, uint32_t base_addr) {
   uint8_t srmfile[256] = SAVE_BASEDIR;
   append_file_basename((char*)srmfile, (char*)filename, ".srm", sizeof(srmfile));
+  append_ips_crc_to_srmpath((char*)srmfile, sizeof(srmfile));
   printf("SRM file: %s\n", srmfile);
 
   uint32_t filesize;
   /* check for SRM file in new centralized sram folder */
   filesize = load_sram(srmfile, base_addr);
   if(file_res) {
-    /* try to move SRM file from old place to new one and to load again */
-    strcpy(strrchr((char*)filename, (int)'.'), ".srm");
-    printf("%s not found, trying to load and migrate %s...\n", srmfile, filename);
+    /* try to move SRM file from old place to new one and to load again.
+     * Use a local copy so we never mutate the caller's filename buffer —
+     * overwriting it with ".srm" would later cause auto_apply_ips_patch()
+     * to see a ".srm" extension and skip patching entirely.              */
+    uint8_t old_srmfile[256];
+    strncpy((char*)old_srmfile, (char*)filename, sizeof(old_srmfile) - 1);
+    old_srmfile[sizeof(old_srmfile) - 1] = '\0';
+    char *old_dot = strrchr((char*)old_srmfile, '.');
+    if(old_dot) strcpy(old_dot, ".srm");
+    printf("%s not found, trying to load and migrate %s...\n", srmfile, old_srmfile);
     /* check if new sram folder exists, create it if it doesn't */
     check_or_create_folder(SAVE_BASEDIR);
-    f_rename((TCHAR*)filename, (TCHAR*)srmfile);
+    f_rename((TCHAR*)old_srmfile, (TCHAR*)srmfile);
     filesize = load_sram(srmfile, base_addr);
     if(file_res) {
       print_fresult(file_res, "migrate_and_load_sram: could not open %s\n", srmfile);
@@ -936,6 +1012,7 @@ void save_srm(uint8_t* filename, uint32_t sram_size, uint32_t base_addr) {
     char srmfile[256] = SAVE_BASEDIR;
     check_or_create_folder(SAVE_BASEDIR);
     append_file_basename(srmfile, (char*)filename, ".srm", sizeof(srmfile));
+    append_ips_crc_to_srmpath(srmfile, sizeof(srmfile));
     save_sram((uint8_t*)srmfile, sram_size, base_addr);
 }
 

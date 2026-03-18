@@ -25,6 +25,7 @@
 */
 
 #include <string.h>
+#include <ctype.h>
 #include "config.h"
 #include "uart.h"
 #include "filetypes.h"
@@ -41,47 +42,44 @@
 
 extern cfg_t CFG;
 
-static uint8_t build_sidecar_filename(char *dst, size_t dstsize, const uint8_t *path, const TCHAR *filename, const char *extension) {
-  int written;
-  char *dot;
-
-  written = snprintf(dst, dstsize, "%s%s%s", path, strcmp((const char*)path, "/") ? "/" : "", filename);
-  if(written < 0 || (size_t)written >= dstsize) {
-    return 0;
+/* FNV-1a 32-bit hash of the filename basename (up to the last dot), lowercased.
+ * Used to match .ips sidecars without per-file f_stat() calls.              */
+static uint32_t hash_basename(const TCHAR *fn) {
+  const char *dot = strrchr((const char*)fn, '.');
+  uint32_t h = 2166136261u;
+  for(const TCHAR *c = fn; *c && (const char*)c != dot; c++) {
+    h ^= (uint8_t)tolower((unsigned char)*c);
+    h *= 16777619u;
   }
-  dot = strrchr(dst, '.');
-  if(dot == NULL) {
-    return 0;
-  }
-  written = snprintf(dot, dstsize - (size_t)(dot - dst), "%s", extension);
-  return written > 0 && (size_t)written < (dstsize - (size_t)(dot - dst));
+  return h;
 }
 
-static uint8_t rom_supports_ips_patch(const TCHAR *filename) {
-  const char *ext = strrchr((const char*)filename, '.');
+/* Hash table for IPS basenames collected during the single readdir pass.
+ * Placed in AHB RAM (separate 16KB bank) to avoid exhausting the 16KB main
+ * RAM.  The table is explicitly reset (n_ips_hashes = 0) before each use so
+ * the missing BSS zero-init of .ahbram sections is not an issue.            */
+#define IPS_HASH_TABLE_SIZE 1024
+static uint32_t ips_hash_table[IPS_HASH_TABLE_SIZE] IN_AHBRAM;
+static uint16_t n_ips_hashes;
 
-  if(ext == NULL) {
-    return 0;
+/* Check if fn (read back from SRAM, possibly with hide_extensions '\x01')
+ * matches any collected IPS basename hash.                                  */
+static uint8_t ips_basename_in_table(const uint8_t *fn) {
+  /* find the last '.' or '\x01' (hide_extensions replaces '.' with '\x01') */
+  const uint8_t *ext = NULL;
+  for(const uint8_t *p = fn; *p; p++) {
+    if(*p == '.' || *p == 1) ext = p;
   }
-  ext++;
-  return !strcasecmp(ext, "SMC")
-      || !strcasecmp(ext, "SFC")
-      || !strcasecmp(ext, "FIG")
-      || !strcasecmp(ext, "SWC");
-}
-
-static uint8_t rom_has_ips_patch(const uint8_t *path, const TCHAR *filename) {
-  FILINFO patch_info;
-  char ipsfile[256];
-
-  if(!rom_supports_ips_patch(filename)) {
-    return 0;
+  if(ext == NULL) return 0;
+  uint32_t h = 2166136261u;
+  for(const uint8_t *c = fn; c != ext; c++) {
+    h ^= (uint8_t)tolower((unsigned char)*c);
+    h *= 16777619u;
   }
-  if(!build_sidecar_filename(ipsfile, sizeof(ipsfile), path, filename, ".ips")) {
-    return 0;
+  for(uint16_t i = 0; i < n_ips_hashes; i++) {
+    if(ips_hash_table[i] == h) return 1;
   }
-  patch_info.lfname = NULL;
-  return f_stat((TCHAR*)ipsfile, &patch_info) == FR_OK && !(patch_info.fattrib & AM_DIR);
+  return 0;
 }
 
 /*
@@ -106,6 +104,8 @@ uint16_t scan_dir(const uint8_t *path, const uint32_t base_addr, const SNES_FTYP
   char buf[7];
   size_t fnlen;
 
+  n_ips_hashes = 0;
+
   fno.lfsize = 255;
   fno.lfname = (TCHAR*)file_lfn;
   res = f_opendir(&dir, (TCHAR*)path);
@@ -120,6 +120,14 @@ printf("start\n");
       res = f_readdir(&dir, &fno);
       if(res != FR_OK || fno.fname[0] == 0 || numentries >= 16000)break;
       fn = *fno.lfname ? fno.lfname : fno.fname;
+      /* collect IPS basenames in-line (all non-hidden, non-dir files)        */
+      if(!(fno.fattrib & (AM_DIR | AM_HID | AM_SYS)) && fn[0] != '.') {
+        const char *ips_ext = strrchr((const char*)fn, '.');
+        if(ips_ext && !strcasecmp(ips_ext + 1, "ips")
+           && n_ips_hashes < IPS_HASH_TABLE_SIZE) {
+          ips_hash_table[n_ips_hashes++] = hash_basename(fn);
+        }
+      }
       type = determine_filetype(fno);
       if(is_requested_filetype(type, filetypes)) {
         switch(type) {
@@ -138,9 +146,6 @@ printf("start\n");
               snprintf(buf, sizeof(buf), " <dir>");
             } else {
               if(fn[0]=='.') continue; /* omit dot files */
-              if(type == TYPE_ROM && rom_has_ips_patch(path, fn)) {
-                entry_type |= TYPE_FLAG_PATCHED;
-              }
               make_filesize_string(buf, fno.fsize);
               if(CFG.hide_extensions) {
                 *(strrchr(fn, '.')) = 1;
@@ -171,6 +176,24 @@ printf("start\n");
   }
   /* write directory termination */
   sram_writelong(0, ptr_tbl_off);
+  /* Post-pass: mark TYPE_ROM entries whose IPS sidecar was seen above.
+   * Operates on already-written SRAM (FPGA SPI, not SD card) so it is fast
+   * regardless of directory size. Handles both normal filenames and the
+   * hide_extensions case where '.' is replaced with '\x01' in SRAM.        */
+  if(n_ips_hashes > 0) {
+    uint32_t scan_off = base_addr;
+    for(uint16_t i = 0; i < numentries; i++, scan_off += 4) {
+      uint32_t entry = sram_readlong(scan_off);
+      uint8_t  type  = (uint8_t)(entry >> 24);
+      if(type == TYPE_ROM) {
+        uint32_t fn_addr = SRAM_MENU_ADDR + (entry & 0x00ffffffu) + 6;
+        sram_readstrn(file_lfn, fn_addr, sizeof(file_lfn) - 1);
+        if(ips_basename_in_table(file_lfn)) {
+          sram_writebyte(TYPE_ROM | TYPE_FLAG_PATCHED, scan_off + 3);
+        }
+      }
+    }
+  }
   if(CFG.sort_directories) {
     sort_dir(SRAM_DIR_ADDR, numentries);
   }

@@ -177,7 +177,7 @@
 #define TYPE_IPS                    $04
 #define TYPE_CHT                    $05
 #define TYPE_SKIN                   $06
-#define TYPE_BASE_MASK              $1f
+#define TYPE_BASE_MASK              $df  /* ~TYPE_FLAG_PATCHED: clears bit 5 only, preserves SUBDIR/PARENT bits */
 #define TYPE_FLAG_PATCHED           $20
 #define TYPE_SUBDIR                 $40
 #define TYPE_PARENT                 $80
