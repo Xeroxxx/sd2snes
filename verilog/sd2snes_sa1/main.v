@@ -189,13 +189,6 @@ wire [7:0] SNES_DATA_IN = (SNES_DATAr[3] & SNES_DATAr[2]);
 wire SNES_PULSE_IN = SNES_READ_IN & SNES_WRITE_IN & ~SNES_CPU_CLK_IN;
 
 wire SNES_PULSE_end = (SNES_PULSEr[6:1] == 6'b000011);
-// SNES_bus_free: SNES ROM bus is in its inter-cycle free phase.
-// Level signal: remains asserted for the entire duration that /RD=1, /WR=1, CPU_CLK=0
-// (2-cycle debounced), enabling back-to-back SA-1 ROM accesses within one free phase.
-// Replaces SNES_cycle_end (unsafe during DMA: CLK falls while /RD still asserted) and
-// the one-shot SNES_PULSE_free rising-edge detector (only one access slot per cycle).
-// Combined with ~IS_ROM below, this restores nominal SA-1 ROM throughput.
-wire SNES_bus_free = SNES_PULSEr[2] & SNES_PULSEr[1];
 wire SNES_PARD_start = (SNES_PARDr[6:1] == 6'b111110);
 wire SNES_PARD_end = (SNES_PARDr[6:1] == 6'b000001);
 // Sample PAWR data earlier on CPU accesses, later on DMA accesses...
@@ -231,18 +224,17 @@ assign DCM_RST=0;
 wire IS_SAVERAM;
 
 //wire mcu_free_slot = SNES_cycle_end | free_strobe;
-// free_slot: SA-1 may access the ROM (PSRAM) bus when:
-//   SNES_bus_free  — SNES ROM cycle has ended (PULSE stable-high ≥2 clocks; DMA-safe)
-//   ~IS_ROM        — SNES is in a non-ROM cycle; PSRAM bus is continuously idle.
-//                    IS_ROM = ~SNES_ROMSEL (5-clk debounce). /ROMSEL asserts ~16 FPGA
-//                    clocks before /RD, so a SA-1 access that starts during the 5-clock
-//                    debounce window (≤9 clocks) finishes well before SNES /RD fires. ✓
-//                    Restores the pre-commit-3ccffb1 `~IS_ROM` behavior that gave the
-//                    SA-1 continuous back-to-back ROM access during non-ROM SNES cycles,
-//                    bringing SA-1 throughput to nominal (issue #244, Kirby/SMRPG).
-//   free_strobe    — belt-and-suspenders one-shot at cycle_start when ~ROM_HIT
+// free_slot: SA-1 may access ROM bus when:
+//   SNES_RD_end   — /RD confirmed deasserted (2-cycle debounce of READr falling edge).
+//                   Safe against DMA (unlike SNES_cycle_end which fires on CPU_CLK fall
+//                   while /RD may still be asserted during DMA). Fires ~1 clk after
+//                   SNES_cycle_end in normal cycles; later in DMA. Replaces SNES_PULSE_end.
+//   ~IS_ROM       — non-ROM SNES cycle: PSRAM bus is idle, /RD never asserted to it.
+//                   IS_ROM = ~SNES_ROMSEL (5-clk debounce). Safe: /ROMSEL deasserts
+//                   well before /RD would fire on any PSRAM access.
+//   free_strobe   — one-shot at cycle_start when ~ROM_HIT (non-ROM SNES cycle)
 wire SD_DMA_TO_ROM;
-wire free_slot = (SNES_bus_free | ~IS_ROM | free_strobe) & ~SD_DMA_TO_ROM;
+wire free_slot = (SNES_RD_end | ~IS_ROM | free_strobe) & ~SD_DMA_TO_ROM;
 
 // TODO: Provide full bandwidth if snes is not accessing the bus.
 reg [7:0] SNES_cycle_end_delay;
