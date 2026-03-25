@@ -295,7 +295,11 @@ parameter SNES_DEAD_TIMEOUT = 17'd85714; // 1ms
 parameter SNES_DEAD_TIMEOUT = 17'd85867; // 1ms
 `endif
 
-parameter ROM_CYCLE_LEN = 4'd7; // Increased from 6 due to tight timing on some sd2snes.  Two pics from boards with errors had a Micron chip with 0LA41/PW510.  Same build lot.
+parameter ROM_CYCLE_LEN = 4'd6; // Early address drive (SA1_ROM_HIT_EARLY) presents the SA-1 ROM address to the
+                               // PSRAM 1 CLK2 before the ADDR state begins, restoring the 1 CLK2 of setup
+                               // margin that reducing from 7→6 removes.  Total PSRAM window is unchanged:
+                               //   combo early + 7 posedges in ADDR × 11.667 ns = 93.3 ns > 70 ns spec.
+                               // Previously at 7: was unsafe to reduce due to Micron lot 0LA41/PW510 failures.
 
 reg [10:0] STATE;
 initial STATE = ST_IDLE;
@@ -708,8 +712,18 @@ reg        SA1_ROM_WORDr;
 reg RQ_SA1_ROM_RDYr; initial RQ_SA1_ROM_RDYr = 1;
 assign SA1_ROM_RDY = RQ_SA1_ROM_RDYr;
 
-wire SA1_ROM_RD_HIT = |(STATE & ST_SA1_ROM_RD_ADDR);
-wire SA1_ROM_HIT    = SA1_ROM_RD_HIT;
+wire SA1_ROM_RD_HIT    = |(STATE & ST_SA1_ROM_RD_ADDR);
+// Drive ROM address 1 CLK2 early: assert SA1_ROM_HIT during IDLE when RRQ/PEND is
+// visible, before the state machine transitions to ST_SA1_ROM_RD_ADDR.  This gives
+// the PSRAM 1 extra CLK2 of address setup time, allowing ROM_CYCLE_LEN = 6 while
+// maintaining the same access margin (8 full CLK2 × 11.667 ns = 93.3 ns > 70 ns).
+// SA1_ROM_ADDR (= sa1.v rom_bus_addr_r register output) is stable throughout both
+// the early IDLE cycle and the entire ADDR state, so no separate registered copy is
+// needed in the address mux — keeping it 4-to-1 and within XC3S400 LUT budget.
+wire SA1_ROM_HIT_EARLY = |(STATE & ST_IDLE)
+                       & (SA1_ROM_RRQ | SA1_ROM_RD_PENDr)
+                       & (free_slot | SNES_DEADr);
+wire SA1_ROM_HIT       = SA1_ROM_RD_HIT | SA1_ROM_HIT_EARLY;
 
 `ifdef MK2
 my_dcm snes_dcm(
@@ -719,8 +733,9 @@ my_dcm snes_dcm(
   .RST(DCM_RST)
 );
 
-assign ROM_ADDR  = (SD_DMA_TO_ROM) ? MCU_ADDR[23:1] : SA1_ROM_HIT ? SA1_ROM_ADDRr[23:1] : MCU_HIT ? ROM_ADDRr[23:1] : MAPPED_SNES_ADDR[23:1];
-assign ROM_ADDR0 = (SD_DMA_TO_ROM) ? MCU_ADDR[0]    : SA1_ROM_HIT ? SA1_ROM_ADDRr[0]    : MCU_HIT ? ROM_ADDRr[0]    : MAPPED_SNES_ADDR[0];
+// SA1_ROM_ADDR (sa1.v rom_bus_addr_r) is used directly — stable in early IDLE and ADDR states.
+assign ROM_ADDR  = (SD_DMA_TO_ROM) ? MCU_ADDR[23:1] : SA1_ROM_HIT ? SA1_ROM_ADDR[23:1] : MCU_HIT ? ROM_ADDRr[23:1] : MAPPED_SNES_ADDR[23:1];
+assign ROM_ADDR0 = (SD_DMA_TO_ROM) ? MCU_ADDR[0]    : SA1_ROM_HIT ? SA1_ROM_ADDR[0]    : MCU_HIT ? ROM_ADDRr[0]    : MAPPED_SNES_ADDR[0];
 
 assign ROM_CE = 1'b0;
 
@@ -749,9 +764,9 @@ pll snes_pll(
 );
 
 wire ROM_ADDR22;
-assign ROM_ADDR22 = (SD_DMA_TO_ROM) ? MCU_ADDR[1]    : SA1_ROM_HIT ? SA1_ROM_ADDRr[1]    : MCU_HIT ? ROM_ADDRr[1]    : MAPPED_SNES_ADDR[1];
-assign ROM_ADDR   = (SD_DMA_TO_ROM) ? MCU_ADDR[23:2] : SA1_ROM_HIT ? SA1_ROM_ADDRr[23:2] : MCU_HIT ? ROM_ADDRr[23:2] : MAPPED_SNES_ADDR[23:2];
-assign ROM_ADDR0  = (SD_DMA_TO_ROM) ? MCU_ADDR[0]    : SA1_ROM_HIT ? SA1_ROM_ADDRr[0]    : MCU_HIT ? ROM_ADDRr[0]    : MAPPED_SNES_ADDR[0];
+assign ROM_ADDR22 = (SD_DMA_TO_ROM) ? MCU_ADDR[1]    : SA1_ROM_HIT ? SA1_ROM_ADDR[1]    : MCU_HIT ? ROM_ADDRr[1]    : MAPPED_SNES_ADDR[1];
+assign ROM_ADDR   = (SD_DMA_TO_ROM) ? MCU_ADDR[23:2] : SA1_ROM_HIT ? SA1_ROM_ADDR[23:2] : MCU_HIT ? ROM_ADDRr[23:2] : MAPPED_SNES_ADDR[23:2];
+assign ROM_ADDR0  = (SD_DMA_TO_ROM) ? MCU_ADDR[0]    : SA1_ROM_HIT ? SA1_ROM_ADDR[0]    : MCU_HIT ? ROM_ADDRr[0]    : MAPPED_SNES_ADDR[0];
 
 assign ROM_ZZ = 1'b1;
 assign ROM_1CE = ROM_ADDR22;
@@ -810,9 +825,9 @@ always @(posedge CLK2) begin
     SA1_ROM_WORDr <= SA1_ROM_WORD;
     SA1_ROM_DATAr <= SA1_ROM_DATA;
   end else if(|(STATE & (ST_SA1_ROM_RD_ADDR)) & ~|ST_MEM_DELAYr) begin
-    // enable rdy/response 1 cycle earlier
-    RQ_SA1_ROM_RDYr <= 1'b1;
-  end else if(STATE & (ST_SA1_ROM_RD_END)) begin
+    // complete access: clear pending and assert ready 1 cycle before returning to IDLE.
+    // ST_SA1_ROM_RD_END is skipped (ADDR goes directly to IDLE), so pending must be
+    // cleared here instead.
     SA1_ROM_RD_PENDr <= 1'b0;
     SA1_ROM_WR_PENDr <= 1'b0;
     RQ_SA1_ROM_RDYr <= 1'b1;
@@ -869,10 +884,15 @@ always @(posedge CLK2) begin
     ST_SA1_ROM_RD_ADDR: begin
       STATE <= ST_SA1_ROM_RD_ADDR;
       ST_MEM_DELAYr <= ST_MEM_DELAYr - 1;
-      if(ST_MEM_DELAYr == 0) STATE <= ST_SA1_ROM_RD_END;
+      if(ST_MEM_DELAYr == 0) STATE <= ST_IDLE; // skip RD_END: save 1 CLK2 per access
       SA1_ROM_DINr <= (ROM_ADDR0_r ? ROM_DATA[15:0] : {ROM_DATA[7:0],ROM_DATA[15:8]});
     end
-    ST_MCU_RD_END, ST_MCU_WR_END, ST_SA1_ROM_RD_END: begin
+    ST_MCU_RD_END, ST_MCU_WR_END: begin
+      STATE <= ST_IDLE;
+    end
+    ST_SA1_ROM_RD_END: begin
+      // No longer reachable: ST_SA1_ROM_RD_ADDR now goes directly to ST_IDLE at delay==0.
+      // Pending/ready signals are managed solely in the SA1 r/w request always block.
       STATE <= ST_IDLE;
     end
   endcase
