@@ -401,14 +401,28 @@ reg       step_r; initial step_r = 0;
 
 wire      sa1_clock_en_pre = sa1_cycle_r == 6;
 
+reg [3:0] min_cyc_cnt_r; initial min_cyc_cnt_r = 0;
+// min_cyc_cnt_r[3] = 1 means at least 8 CLK2 have elapsed since pipeline_advance.
+// Counts 0->1->...->8 then saturates.  Bit 3 goes high at count=8 and stays.
+// This enforces the SA-1 minimum machine cycle of 8 CLK2 (= 1 SA-1 clock at 10.74 MHz)
+// cleanly from each pipeline_advance, independent of the free-running sa1_clock_en.
 always @(posedge CLK) begin
   if (RST) begin
-    sa1_cycle_r <= 0;
-    sa1_clock_en <= 0;
+    sa1_cycle_r   <= 0;
+    sa1_clock_en  <= 0;
+    min_cyc_cnt_r <= 0;
   end
   else begin
+    // sa1_cycle_r and sa1_clock_en: fully free-running, completely unchanged from original.
+    // They are still used by ST_EXE_IDLE and exe_waitcnt_r.
     sa1_cycle_r  <= sa1_cycle_r + 1;
     sa1_clock_en <= sa1_clock_en_pre;
+
+    // Minimum cycle counter: reset on pipeline_advance, count up, saturate at 8.
+    if (pipeline_advance)
+      min_cyc_cnt_r <= 4'd0;
+    else if (~min_cyc_cnt_r[3])
+      min_cyc_cnt_r <= min_cyc_cnt_r + 1;
   end
 end
 
@@ -3285,7 +3299,7 @@ always @(posedge CLK) begin
   dma_active_r <= dma_cc1_active_r | dma_normal_pri_active_r | vbd_active_r;
 
 `ifdef DEBUG
-  if (sa1_clock_en & ~|exe_waitcnt_r & EXE_STATE[clog2(ST_EXE_WAIT)] & ~step_r) cycle_wait_r <= 1;
+  if (min_cyc_cnt_r[3] & ~|exe_waitcnt_r & EXE_STATE[clog2(ST_EXE_WAIT)] & ~step_r) cycle_wait_r <= 1;
   else if (pipeline_advance) cycle_wait_r <= 0;
 
   if (RST) begin
@@ -3297,7 +3311,7 @@ always @(posedge CLK) begin
 `endif
 end
 
-assign pipeline_advance = sa1_clock_en & ~|exe_waitcnt_r & EXE_STATE[clog2(ST_EXE_WAIT)] & step_r & ~dma_active_r & ~WAI_r;
+assign pipeline_advance = min_cyc_cnt_r[3] & ~|exe_waitcnt_r & EXE_STATE[clog2(ST_EXE_WAIT)] & step_r & ~dma_active_r & ~WAI_r;
 
 //-------------------------------------------------------------------
 // DEBUG OUTPUT
