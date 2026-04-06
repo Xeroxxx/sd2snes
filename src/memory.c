@@ -50,6 +50,7 @@ memory.c: RAM operations
 #include "rtc.h"
 #include "savestate.h"
 #include "sgb.h"
+#include "dbglog.h"
 
 #include <string.h>
 char* hex = "0123456789ABCDEF";
@@ -272,6 +273,11 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   filesize = file_handle.fsize;
   smc_id(&romprops, file_offset);
   file_close();
+  dbglog("smc_id: mapper=%d fpga_conf=%s has_spc7110=%d",
+         romprops.mapper_id,
+         romprops.fpga_conf ? (const char*)romprops.fpga_conf : "NULL(BASE)",
+         (int)romprops.has_spc7110);
+  dbglog_flush(); /* checkpoint: ROM header identified */
 
   if(flags & LOADROM_WITH_COMBO) {
     printf("Combo Transition...");
@@ -303,7 +309,12 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   /* reconfigure FPGA if necessary */
   if(flags & LOADROM_WAIT_SNES) {
     printf("Checking if ok to reconfigure...");
+    dbglog("load_rom: waiting for SNES FPGA_RECONF (fpga_conf=%s mapper=%d)...",
+           romprops.fpga_conf ? (const char*)romprops.fpga_conf : "NULL(BASE)",
+           romprops.mapper_id);
+    dbglog_flush(); /* flush BEFORE the blocking wait so we know we reached here */
     while(snes_get_mcu_cmd() != SNES_CMD_FPGA_RECONF);
+    dbglog("load_rom: FPGA_RECONF received, calling fpga_pgm");
     printf("OK.\n");
   }
   if(romprops.fpga_conf || (flags & LOADROM_WITH_FPGA)) {
@@ -311,6 +322,18 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
     printf("reconfigure FPGA with %s...\n", fpga_conf);
     fpga_pgm((uint8_t*)fpga_conf);
     fpga_set_features(fpga_features_preload);
+    /* Inject real time into the SPC7110 RTC emulator immediately after
+     * FPGA load so that the RTC never presents the invalid BCD calendar
+     * values that the initial block defaults to (month=0x00, day=0x00).
+     * Both the blank-SRAM (Mode 0) and saved-SRAM (Mode 1) paths are safe:
+     *   Mode 0: game detects blank SRAM via the SRAM magic bytes, not via
+     *           the RTC state; it runs setup and overwrites SRAM/time anyway.
+     *   Mode 1: game reads the live RTC and uses elapsed-time calculation;
+     *           a valid current time prevents the month=0 infinite-retry hang. */
+    if(romprops.has_spc7110) {
+      set_fpga_time(get_bcdtime());
+    }
+    dbglog_flush(); /* checkpoint: FPGA reconfigure done */
   }
   if(flags & LOADROM_WAIT_SNES) snes_set_snes_cmd(0x77);
   set_mcu_addr(base_addr + romprops.load_address);
@@ -335,6 +358,7 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   }
   uart_putc('\n');
   file_close();
+  dbglog_flush(); /* checkpoint: ROM data loaded */
 
   printf("rom header map: %02x; mapper id: %d\n", romprops.header.map, romprops.mapper_id);
   ticks_total=getticks()-ticksstart;
@@ -442,8 +466,9 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
       // powerslide relies on the init value to be 00.
       sram_memset(SRAM_SAVE_ADDR, romprops.ramsize_bytes, romprops.has_gsu ? 0x00 : 0xFF);
       if (romprops.sramsize_bytes) migrate_and_load_srm(filename, SRAM_SAVE_ADDR);
-      /* file not found error is ok (SRM file might not exist yet) */
-      if(file_res == FR_NO_FILE) file_res = 0;
+      /* file/path not found is ok (saves dir or SRM file might not exist yet) */
+      if(file_res == FR_NO_FILE || file_res == FR_NO_PATH) file_res = 0;
+      dbglog_flush(); /* checkpoint: SRM loaded (or absent, file_res cleared above) */
       saveram_crc_old = calc_sram_crc(SRAM_SAVE_ADDR + romprops.srambase, romprops.sramsize_bytes, 0);
       saveram_crc = 0;
       saveram_offset = 0;
@@ -528,6 +553,7 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
     assert_reset();
     init(filename);
     deassert_reset();
+    dbglog_flush(); /* checkpoint: init (cheats+savestate) done */
   }
   // loading a new rom implies the previous crc is no longer valid
   sram_crc_valid = romprops.has_combo ? 1 : 0;
@@ -676,17 +702,26 @@ uint32_t migrate_and_load_srm(uint8_t* filename, uint32_t base_addr) {
   append_file_basename((char*)srmfile, (char*)filename, ".srm", sizeof(srmfile));
   printf("SRM file: %s\n", srmfile);
 
+  /* ensure save folder exists before attempting load so that a missing
+     directory yields FR_NO_FILE(4) rather than FR_NO_PATH(5), preventing
+     a spurious 5-blink LED error for first-time game loads */
+  check_or_create_folder(SAVE_BASEDIR);
+
   uint32_t filesize;
+  FRESULT load_res;
   /* check for SRM file in new centralized sram folder */
   filesize = load_sram(srmfile, base_addr);
-  if(file_res) {
+  load_res = file_res;
+  /* immediately suppress expected "not found" error so the SysTick LED
+     handler never captures a transient FR_NO_FILE/FR_NO_PATH value */
+  if(file_res == FR_NO_FILE || file_res == FR_NO_PATH) file_res = 0;
+  if(load_res) {
     /* try to move SRM file from old place to new one and to load again */
     strcpy(strrchr((char*)filename, (int)'.'), ".srm");
     printf("%s not found, trying to load and migrate %s...\n", srmfile, filename);
-    /* check if new sram folder exists, create it if it doesn't */
-    check_or_create_folder(SAVE_BASEDIR);
     f_rename((TCHAR*)filename, (TCHAR*)srmfile);
     filesize = load_sram(srmfile, base_addr);
+    if(file_res == FR_NO_FILE || file_res == FR_NO_PATH) file_res = 0;
     if(file_res) {
       print_fresult(file_res, "migrate_and_load_sram: could not open %s\n", srmfile);
       return 0;

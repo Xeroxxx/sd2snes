@@ -50,7 +50,7 @@ XILINX_PART = $(shell $(XILINX_ENV) $(XILINX_BIN)/xtclsh $(XILINX_SCRIPTS)/xgetp
 
 # prepare source lists
 VSRC := $(sort $(VSRC))
-VHSRC := $(sort $(VHSRC))
+VHSRC := $(VHSRC_PKG) $(sort $(filter-out $(VHSRC_PKG),$(VHSRC)))
 UCF := main.ucf
 
 # apply differing source path
@@ -124,12 +124,12 @@ main.ngd: main.ngc $(XIL_IP)
 
 main_map.ncd: main.ngd
 	$(call T,[mk2] fpga_$(CORE) - Map)
-	$(eval XILINX_MAP_OPTS := $(shell $(XILINX_ENV) $(XILINX_BIN)/xtclsh $(XILINX_SCRIPTS)/xgenmapcmd.tcl sd2snes_$(CORE).xise))
+	$(eval XILINX_MAP_OPTS := $(shell $(XILINX_ENV) $(XILINX_BIN)/xtclsh $(XILINX_SCRIPTS)/xgenmapcmd.tcl sd2snes_$(CORE).xise 2>/dev/null | tail -1))
 	$(XILINX_ENV) $(XILINX_BIN)/map -p $(XILINX_PART) $(XILINX_MAP_OPTS) -o $@ $^ main.pcf
 
 main.ncd: main_map.ncd
 	$(call T,[mk2] fpga_$(CORE) - Place and Route)
-	$(eval XILINX_PAR_OPTS := $(shell $(XILINX_ENV) $(XILINX_BIN)/xtclsh $(XILINX_SCRIPTS)/xgenparcmd.tcl sd2snes_$(CORE).xise))
+	$(eval XILINX_PAR_OPTS := $(shell $(XILINX_ENV) $(XILINX_BIN)/xtclsh $(XILINX_SCRIPTS)/xgenparcmd.tcl sd2snes_$(CORE).xise 2>/dev/null | tail -1))
 	$(XILINX_ENV) $(XILINX_BIN)/par -w $(XILINX_PAR_OPTS) $^ $@ main.pcf
 	@! grep -q 'Timing Score: [1-9][0-9]*' main.par || (echo "[mk2] sd2snes_$(CORE): Timing not met! Aborting."; exit 55)
 

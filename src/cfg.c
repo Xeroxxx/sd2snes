@@ -296,6 +296,7 @@ int cfg_validity_check_recent_games() {
   TCHAR fntmp[10][256];
   file_open(LAST_FILE, FA_READ);
   if(file_status == FILE_ERR) {
+    file_res = 0; /* lastgame.cfg is optional */
     return 0;
   }
   for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
@@ -311,7 +312,7 @@ int cfg_validity_check_recent_games() {
     write_indices[index] = file_status;
     if(file_status != FILE_OK)
       rewrite_lastfile = 1;
-    file_close();
+    if(!file_res) file_close(); else file_res = 0; /* guard: missing game file is not an error */
   }
   if(rewrite_lastfile) {
     f_rename ((TCHAR*)LAST_FILE, (TCHAR*)LAST_FILE_BAK);
@@ -338,17 +339,22 @@ int cfg_add_last_game(uint8_t *fn) {
     fqfn[255] = 0;
   }
   strncat(fqfn, (const char*)fn, 256 - strlen(fqfn) - 1);
-  for(index = 0; index < 10; index++) {
-    f_gets(fntmp[index], 255, &file_handle);
-    if((*fntmp[index] == 0) || (*fntmp[index] == '\n')) {
-      break; /* last entry found */
+  if(!file_res) {
+    for(index = 0; index < 10; index++) {
+      f_gets(fntmp[index], 255, &file_handle);
+      if((*fntmp[index] == 0) || (*fntmp[index] == '\n')) {
+        break; /* last entry found */
+      }
+      if(!strncasecmp((TCHAR*)fqfn, fntmp[index], 255)) {
+        found = 1; /* file already in list */
+        foundindex = index;
+      }
     }
-    if(!strncasecmp((TCHAR*)fqfn, fntmp[index], 255)) {
-      found = 1; /* file already in list */
-      foundindex = index;
-    }
+    file_close();
+  } else {
+    file_res = 0; /* lastgame.cfg missing is OK — start fresh list */
+    index = 0;
   }
-  file_close();
   file_open(LAST_FILE, FA_CREATE_ALWAYS | FA_WRITE);
   /* always put new entry on top of list */
   err = f_puts((const TCHAR*)fqfn, &file_handle);
@@ -372,23 +378,29 @@ int cfg_add_last_game(uint8_t *fn) {
 int cfg_get_last_game(uint8_t *fn, uint8_t index) {
   int err = 0;
   file_open(LAST_FILE, FA_READ);
-  do {
-    f_gets((TCHAR*)fn, 255, &file_handle);
-  } while (index--);
-  file_close();
+  if(!file_res) {
+    do {
+      f_gets((TCHAR*)fn, 255, &file_handle);
+    } while (index--);
+    file_close();
+  }
   return err;
 }
 
 void cfg_dump_recent_games_for_snes(uint32_t address) {
   TCHAR fntmp[256];
-  int index;
+  int index = 0;
   file_open(LAST_FILE, FA_READ);
-  for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
-    f_gets(fntmp, 255, &file_handle);
-    sram_writestrn(strrchr((const char*)fntmp, '/')+1, address+256*index, 256);
+  if(!file_res) {
+    for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
+      f_gets(fntmp, 255, &file_handle);
+      sram_writestrn(strrchr((const char*)fntmp, '/')+1, address+256*index, 256);
+    }
+    file_close();
+  } else {
+    file_res = 0; /* file missing is not an error — suppress LED blink */
   }
   STM.num_recent_games = index;
-  file_close();
 }
 
 int cfg_validity_check_favorite_games() {
@@ -396,6 +408,7 @@ int cfg_validity_check_favorite_games() {
   TCHAR fntmp[10][256];
   file_open(FAVORITES_FILE, FA_READ);
   if(file_status == FILE_ERR) {
+    file_res = 0; /* favorites.cfg is optional */
     return 0;
   }
   for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
@@ -411,7 +424,7 @@ int cfg_validity_check_favorite_games() {
     write_indices[index] = file_status;
     if(file_status != FILE_OK)
       rewrite_favoritefile = 1;
-    file_close();
+    if(!file_res) file_close(); else file_res = 0; /* guard: missing game file is not an error */
   }
   if(rewrite_favoritefile) {
     f_rename ((TCHAR*)FAVORITES_FILE, (TCHAR*)FAVORITES_FILE_BAK);
@@ -448,7 +461,8 @@ int cfg_add_favorite_game(uint8_t *fn) {
       foundindex = index;
     }
   }
-  file_close();
+  if(!file_res) file_close();
+  else { file_res = 0; index = 0; }
 
   if(index > 9 + found) {
     //List is full and game is not already in list, refuse to add it
@@ -487,7 +501,8 @@ int cfg_remove_favorite_game(uint8_t index_to_remove) {
       break; /* last entry found */
     }
   }
-  file_close();
+  if(!file_res) file_close();
+  else { file_res = 0; index = 0; }
 
   //Write back all favorites except the one at index_to_remove
   file_open(FAVORITES_FILE, FA_CREATE_ALWAYS | FA_WRITE);
@@ -506,23 +521,31 @@ int cfg_remove_favorite_game(uint8_t index_to_remove) {
 int cfg_get_favorite_game(uint8_t *fn, uint8_t index) {
   int err = 0;
   file_open(FAVORITES_FILE, FA_READ);
-  do {
-    f_gets((TCHAR*)fn, 255, &file_handle);
-  } while (index--);
-  file_close();
+  if(!file_res) {
+    do {
+      f_gets((TCHAR*)fn, 255, &file_handle);
+    } while (index--);
+    file_close();
+  } else {
+    file_res = 0;
+  }
   return err;
 }
 
 void cfg_dump_favorite_games_for_snes(uint32_t address) {
   TCHAR fntmp[256];
-  int index;
+  int index = 0;
   file_open(FAVORITES_FILE, FA_READ);
-  for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
-    f_gets(fntmp, 255, &file_handle);
-    sram_writestrn(strrchr((const char*)fntmp, '/')+1, address+256*index, 256);
+  if(!file_res) {
+    for(index = 0; index < 10 && !f_eof(&file_handle); index++) {
+      f_gets(fntmp, 255, &file_handle);
+      sram_writestrn(strrchr((const char*)fntmp, '/')+1, address+256*index, 256);
+    }
+    file_close();
+  } else {
+    file_res = 0; /* no favorites file is normal — suppress LED blink */
   }
   STM.num_favorite_games = index;
-  file_close();
 }
 
 /* ---- Autoboot ROM functions ---- */

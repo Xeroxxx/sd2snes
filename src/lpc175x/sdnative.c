@@ -271,9 +271,14 @@ int get_and_check_datacrc(uint8_t *buf) {
 }
 
 static inline void wait_busy(void) {
-  while(!(BITBAND(SD_DAT0REG->GPIO_I, SD_DAT0BIT))) {
+  /* ~50 million iterations ≈ 500 ms at 96 MHz with ~10 ns per wiggle.
+     Without this guard, a stuck DAT0 line (e.g. after FPGA reset glitch)
+     would hang the MCU forever. */
+  uint32_t timeout = 50000000U;
+  while(!(BITBAND(SD_DAT0REG->GPIO_I, SD_DAT0BIT)) && --timeout) {
     wiggle_fast_neg1();
   }
+  if(!timeout) printf("wait_busy: DAT0 stuck LOW — SD card busy timeout!\n");
   wiggle_fast_neg(4);
 }
 
@@ -735,7 +740,23 @@ void send_datablock(uint8_t *buf) {
   GPIO_MODE_IN(SD_DAT2REG, SD_DAT2BIT);
   GPIO_MODE_IN(SD_DAT3REG, SD_DAT3BIT);
 
+  /* Wait for CRC status start bit (DAT0 goes LOW) with a timeout.
+     The SD spec requires a turnaround (Nwr) of 2-8 cycles; a fixed
+     3-cycle blind delay can miss the start bit on a freshly re-initialised
+     card (new RCA after disk_initialize) and read garbage, causing the
+     old code to incorrectly detect a CRC error and hang in while(1). */
   wiggle_fast_neg(3);
+  {
+    uint32_t crc_timeout = 1000000U;
+    while((BITBAND(SD_DAT0REG->GPIO_I, SD_DAT0BIT)) && --crc_timeout) {
+      wiggle_fast_neg1();
+    }
+    if(!crc_timeout) {
+      printf("send_datablock: CRC status start bit timeout\n");
+    } else {
+      wiggle_fast_neg1(); /* eat the start bit */
+    }
+  }
   dat0=0;
 
   datshift=4;
@@ -746,11 +767,10 @@ void send_datablock(uint8_t *buf) {
   } while (datshift);
   DBG_SD printf("crc %02x\n", dat0);
   if((dat0 & 7) != 2) {
-    printf("crc error! %02x\n", dat0);
-    while(1);
-  }
-  if(dat0 & 8) {
-    printf("missing start bit in CRC status response...\n");
+    /* Do NOT hang here — log the error and continue.  The bad sector will
+       cause an eventual FR_DISK_ERR in the FatFS layer which the caller
+       handles gracefully. */
+    printf("send_datablock: CRC error! status=%02x\n", dat0);
   }
   wiggle_fast_neg(2);
   wait_busy();

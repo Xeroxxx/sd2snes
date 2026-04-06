@@ -376,14 +376,15 @@ wire       SPC7110_ROM_REQ;
 wire [23:0] SPC7110_ROM_ADDR;
 wire [7:0] SPC7110_ROM_DATA;
 wire       SPC7110_ROM_ACK;
-wire [3:0] SPC7110_RTC_INDEX;
-wire [3:0] SPC7110_RTC_DATA_OUT;
-wire [3:0] SPC7110_RTC_DATA_IN;
-wire       SPC7110_RTC_WR;
-wire       SPC7110_RTC_RD;
-// RTC-4513 stub: return 0 nibbles until a real RTC module is added;
-// has no effect for non-FEoEZ games (RTC_EN gated by FEAT_SRTC).
-assign SPC7110_RTC_DATA_IN = 4'h0;
+// RTC register-file interface wires (SPC7110 ↔ rtc4513_emu)
+wire        SPC7110_RTC_CE_WR;
+wire        SPC7110_RTC_CE_BIT;
+wire        SPC7110_RTC_SER_WR;
+wire [7:0]  SPC7110_RTC_SER_DATA;  // full byte written to $4841 (SPC7110 → emu)
+wire        SPC7110_RTC_SER_RD;
+wire        SPC7110_RTC_SER_RD_END;  // end-of-read strobe for rtc_index auto-increment
+wire [7:0]  SPC7110_RTC_SER_IN;    // 8-bit register value (emu → SPC7110)
+wire [7:0]  SPC7110_RTC_STATUS;    // $4842 byte (emu → SPC7110)
 wire [2:0] SPC7110_DROM_BANK_D;
 wire [2:0] SPC7110_DROM_BANK_E;
 wire [2:0] SPC7110_DROM_BANK_F;
@@ -406,10 +407,20 @@ reg [3:0] spc_delay;
 initial spc_state = SPC_IDLE;
 initial spc_delay = 4'h0;
 
+// Level signal: PSRAM bus is in active use by the SNES when ROM_HIT=1
+// and the SNES has asserted /RD or /WR (SNES_READ/WRITE are active-low:
+// both high = idle bus; any low = access in progress).
+// This supersedes the strobe-based free_slot for SPC7110 internal accesses:
+// the SPC7110 data port and decompressor read from PSRAM during SPC7110
+// register cycles ($48xx / $50xx), where ROM_HIT=0, so the PSRAM is free
+// for the entire register-read cycle instead of only at the cycle boundary.
+wire snes_psram_active = ROM_HIT & ~(SNES_READ & SNES_WRITE);
+wire spc_can_start     = ~snes_psram_active & ~MCU_HIT & ~SD_DMA_TO_ROM;
+
 always @(posedge CLK2) begin
   case (spc_state)
     SPC_IDLE: begin
-      if (SPC7110_ROM_REQ & free_slot & ~MCU_HIT) begin
+      if (SPC7110_ROM_REQ & spc_can_start) begin
         spc_delay <= ROM_CYCLE_LEN;
         spc_state <= SPC_WAIT;
       end
@@ -449,6 +460,7 @@ SPC7110 spc7110_inst (
   .SNES_RD        (SNES_READ),
   .SNES_WR_end    (SNES_WR_end),
   .SNES_RD_start  (SNES_RD_start),
+  .SNES_RD_end    (SNES_RD_end),
   .SNES_DATA_IN   (BUS_DATA),
   .SNES_DATA_OUT  (SPC7110_SNES_DATA_OUT),
   .SNES_DATA_OE   (SPC7110_SNES_DATA_OE),
@@ -456,11 +468,14 @@ SPC7110 spc7110_inst (
   .ROM_ADDR_OUT   (SPC7110_ROM_ADDR),
   .ROM_DATA_IN    (SPC7110_ROM_DATA),
   .ROM_ACK        (SPC7110_ROM_ACK),
-  .RTC_INDEX      (SPC7110_RTC_INDEX),
-  .RTC_DATA_OUT   (SPC7110_RTC_DATA_OUT),
-  .RTC_DATA_IN    (SPC7110_RTC_DATA_IN),
-  .RTC_WR         (SPC7110_RTC_WR),
-  .RTC_RD         (SPC7110_RTC_RD),
+  .RTC_CE_WR      (SPC7110_RTC_CE_WR),
+  .RTC_CE_BIT     (SPC7110_RTC_CE_BIT),
+  .RTC_SER_WR     (SPC7110_RTC_SER_WR),
+  .RTC_SER_DATA   (SPC7110_RTC_SER_DATA),
+  .RTC_SER_RD     (SPC7110_RTC_SER_RD),
+  .RTC_SER_RD_END (SPC7110_RTC_SER_RD_END),
+  .RTC_SER_IN     (SPC7110_RTC_SER_IN),
+  .RTC_STATUS     (SPC7110_RTC_STATUS),
   .RTC_EN         (featurebits[2]),
   .DROM_BANK_D    (SPC7110_DROM_BANK_D),
   .DROM_BANK_E    (SPC7110_DROM_BANK_E),
@@ -472,6 +487,28 @@ wire [7:0] MCU_DOUT;
 wire [31:0] cheat_pgm_data;
 wire [7:0] cheat_data_out;
 wire [2:0] cheat_pgm_idx;
+
+// MCU time interface wires (mcu_cmd → rtc4513_emu)
+wire        mcu_rtc_time_load;
+wire [55:0] mcu_rtc_time;
+
+//--------------------------------------------------------------------
+// RTC-4513 emulator
+//--------------------------------------------------------------------
+rtc4513_emu spc7110_rtc (
+  .clk           (CLK2),
+  .rst           (~spc7110_enable),
+  .ce_wr         (SPC7110_RTC_CE_WR),
+  .ce_bit        (SPC7110_RTC_CE_BIT),
+  .srd_wr        (SPC7110_RTC_SER_WR),
+  .srd_data      (SPC7110_RTC_SER_DATA),
+  .srd_rd        (SPC7110_RTC_SER_RD),
+  .srd_rd_end    (SPC7110_RTC_SER_RD_END),
+  .srd_out       (SPC7110_RTC_SER_IN),
+  .status        (SPC7110_RTC_STATUS),
+  .mcu_time_load (mcu_rtc_time_load),
+  .mcu_time      (mcu_rtc_time)
+);
 
 mcu_cmd snes_mcu_cmd(
   .clk(CLK2),
@@ -530,7 +567,9 @@ mcu_cmd snes_mcu_cmd(
   .cheat_pgm_idx_out(cheat_pgm_idx),
   .cheat_pgm_data_out(cheat_pgm_data),
   .cheat_pgm_we_out(cheat_pgm_we),
-  .dsp_feat_out(dsp_feat)
+  .dsp_feat_out(dsp_feat),
+  .rtc_time_load(mcu_rtc_time_load),
+  .rtc_time(mcu_rtc_time)
 );
 
 address snes_addr(
@@ -649,8 +688,10 @@ assign SNES_DATA = (r213f_enable & ~SNES_PARD & ~r213f_forceread) ? r213fr
               ( msu_enable ? MSU_SNES_DATA_OUT
               :(cheat_hit & ~feat_cmd_unlock) ? cheat_data_out
               :((snescmd_unlock | feat_cmd_unlock) & snescmd_enable) ? snescmd_dout
-              // RG S-DD1 will drive data on normal ROM and RAM reads, during a decompression DMA, and when a $480X register is read.
-              :(spc7110_enable & (spc7110_reg_enable | spc7110_decomp_enable) & SPC7110_SNES_DATA_OE) ? SPC7110_SNES_DATA_OUT
+              // SPC7110 drives data whenever the SNES address is in its register ($48xx) or
+              // decomp output ($50) range. data_out_r holds the value set on SNES_RD_start for the
+              // full read cycle so the SNES CPU samples it correctly at the end of the cycle.
+              :(spc7110_enable & (spc7110_reg_enable | spc7110_decomp_enable)) ? SPC7110_SNES_DATA_OUT
               :(ROM_ADDR0 ? ROM_DATA[7:0] : ROM_DATA[15:8]))
              : 8'bZ;
 

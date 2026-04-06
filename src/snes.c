@@ -112,6 +112,7 @@ void prepare_reset() {
   if(romprops.sramsize_bytes && fpga_test() == FPGA_TEST_TOKEN) {
     writeled(1);
     save_srm(file_lfn, romprops.ramsize_bytes, SRAM_SAVE_ADDR);
+    file_res = 0; /* soft fail: don't blink LED on reset-save errors */
     writeled(0);
   }
   // don't save SGB RTC since we are in reset and it may be undefined
@@ -315,6 +316,7 @@ uint8_t snes_main_loop() {
           save_srm(file_lfn, romprops.ramsize_bytes, SRAM_SAVE_ADDR);
           last_save_failed = save_failed;
           save_failed = file_res ? 1 : 0;
+          file_res = 0; /* soft fail: save_failed tracks retries, don't blink LED */
           didnotsave = save_failed ? 25 : 0;
           writeled(0);
         }
@@ -325,6 +327,7 @@ uint8_t snes_main_loop() {
           save_srm(file_lfn, romprops.ramsize_bytes, SRAM_SAVE_ADDR);
           last_save_failed = save_failed;
           save_failed = file_res ? 1 : 0;
+          file_res = 0; /* soft fail: save_failed tracks retries, don't blink LED */
           didnotsave = save_failed ? 25 : 0;
           writeled(!last_save_failed);
         }

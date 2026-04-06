@@ -1,273 +1,398 @@
 ----------------------------------------------------------------------------------
 -- SPC7110_DEC.vhd
--- SPC7110 Graphics Decompressor
+-- Faithful port of MiSTer SNES SPC7110 graphics decompressor (srg320).
+-- Implements range-arithmetic coding for 1bpp/2bpp/4bpp tile graphics.
 --
--- Implements the context-based binary arithmetic (range) coder used by the
--- SPC7110 chip.  Three decompression modes are supported:
---   Mode 0: 1 bpp graphics
---   Mode 1: 2 bpp graphics
---   Mode 2: 4 bpp graphics
---
--- Architecture:
---   * An SPC7110_FIFO supplies compressed bytes from PSRAM.
---   * The arithmetic coder processes one bit at a time from the bitstream,
---     using an 8-entry context register file (C0-C7).  Each context register
---     holds an evolution-table state index and an MPS bit.
---   * Decoded pixels are accumulated into a byte output register (dec_byte)
---     and signalled via dec_valid/dec_ack.
---   * Graphics mode determines how decoded bits are assembled into pixels and
---     how context indices are selected per bit position.
+-- Adaptations from MiSTer original:
+--   RST_N (active-low) -> rst (active-high)
+--   ENABLE port removed (always active)
+--   DBG_PROB / DBG_CON ports removed
+-- Interface: INIT/RUN model; 32-bit DAT_OUT (8 pixels per write).
 ----------------------------------------------------------------------------------
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
+library STD;
 use IEEE.NUMERIC_STD.ALL;
-
 library work;
 use work.SPC7110_DEC_PKG.all;
 
 entity SPC7110_DEC is
   port (
-    clk          : in  std_logic;
-    rst          : in  std_logic;
-    -- Decompressor control
-    mode         : in  std_logic_vector(1 downto 0); -- 00=1bpp, 01=2bpp, 10=4bpp
-    start        : in  std_logic;  -- pulse: reset all contexts & begin
-    -- Compressed input byte stream from FIFO
-    fifo_empty   : in  std_logic;
-    fifo_data    : in  std_logic_vector(7 downto 0);
-    fifo_rd      : out std_logic;
-    -- Decompressed byte output
-    dec_valid    : out std_logic;
-    dec_byte     : out std_logic_vector(7 downto 0);
-    dec_ack      : in  std_logic;
-    -- Status
-    idle         : out std_logic
+    rst     : in  std_logic;
+    clk     : in  std_logic;
+    DI      : in  std_logic_vector(7 downto 0);
+    RD      : out std_logic;
+    INIT    : in  std_logic;
+    RUN     : in  std_logic;
+    MODE    : in  std_logic_vector(1 downto 0);
+    DAT_OUT : out std_logic_vector(31 downto 0);
+    WR      : out std_logic
   );
 end entity SPC7110_DEC;
 
 architecture rtl of SPC7110_DEC is
 
-  -- Context register file
-  signal ctx_state : t_ctx_state;
-  signal ctx_mps   : t_ctx_mps;
+  type DecompStates_t is (DCS_IDLE, DCS_INIT, DCS_PRELOAD, DCS_WORK);
+  signal DCS          : DecompStates_t;
 
-  -- Range coder state (16-bit range, 16-bit code value)
-  signal range_r   : unsigned(15 downto 0);
-  signal code_c    : unsigned(15 downto 0);
-
-  -- Bit input registers
-  signal bit_buf   : std_logic_vector(7 downto 0);
-  signal bit_cnt   : unsigned(2 downto 0);  -- bits remaining in bit_buf (0=empty)
-  signal load_cnt  : unsigned(1 downto 0) := (others => '0');  -- counts bytes loaded during S_LOAD (need 2)
-
-  -- Decoded output accumulator
-  signal acc_byte  : std_logic_vector(7 downto 0);
-  signal acc_cnt   : unsigned(3 downto 0);  -- number of bits accumulated (0-7)
-
-  -- Decode state machine
-  type t_dec_state is (S_INIT, S_LOAD, S_DECODE, S_OUTPUT, S_IDLE);
-  signal dec_state : t_dec_state;
-
-  signal dec_valid_r : std_logic;
-  signal dec_byte_r  : std_logic_vector(7 downto 0);
-
-  -- Arithmetic coder context lookup (combinational)
-  signal evo         : t_evo_entry;
-  signal ctx_idx     : unsigned(2 downto 0);
-
-  -- Context index selection function:
-  -- For 1bpp: context = bit_pos[2:0] (use 8 contexts for 8 bit positions)
-  -- For 2bpp: context = {bitplane[0], bit_pos[1:0]}
-  -- For 4bpp: context = {bitplane[1:0], bit_pos[0]}
-  signal bit_pos     : unsigned(2 downto 0);  -- bit position within decoded byte (0-7)
-
-  function get_ctx(mode_in : std_logic_vector(1 downto 0);
-                   bit_p   : unsigned(2 downto 0)) return unsigned is
-  begin
-    case mode_in is
-      when "00"   => return bit_p;                          -- 1bpp: 8 contexts
-      when "01"   => return "0" & bit_p(1 downto 0);        -- 2bpp: 4 contexts per plane
-      when "10"   => return "00" & bit_p(0);                -- 4bpp: 2 contexts per plane
-      when others => return bit_p;
-    end case;
-  end function;
+  signal CTX_TBL      : ContextTbl_t;
+  signal CON          : unsigned(4 downto 0);
+  signal TOP          : unsigned(7 downto 0);
+  signal LPS          : std_logic;
+  signal LPS_INV      : std_logic;
+  signal INVERTS      : unsigned(3 downto 0);
+  signal LPSS         : unsigned(3 downto 0);
+  signal SHIFT        : std_logic;
+  signal PROB_BIG_HALF: std_logic;
+  signal IN_HIGH      : unsigned(7 downto 0);
+  signal IN_MID       : unsigned(7 downto 0);
+  signal IN_LOW       : unsigned(7 downto 0);
+  signal IN_BUF       : unsigned(7 downto 0);
+  signal IN_CNT       : unsigned(2 downto 0);
+  signal PIX_ORDER    : PixelOrder_t;
+  signal REAL_ORDER   : PixelOrder_t;
+  signal OUTPUT       : std_logic_vector(35 downto 0);
+  signal PIX_CNT      : unsigned(2 downto 0);
+  signal BIT_CNT      : unsigned(1 downto 0);
+  signal BIT_CNT_LAST : unsigned(1 downto 0);
+  signal LOAD         : unsigned(2 downto 0);
+  signal INT_RD       : std_logic;
+  signal INT_WR       : std_logic;
+  signal PHASE        : std_logic := '0';  -- '0'=rising work, '1'=falling work
+  -- CE counter for Phase 1 slot.  Phase 1 fires when CE_CNT = 0 (immediately
+  -- after Phase 0), giving alternating Phase 0 / Phase 1 every clock cycle.
+  -- Effective decompressor rate: 96 MHz / 2 = 48 MHz, matching MiSTer's
+  -- dual-edge (rising/falling) scheme and fast enough to fill run-2 of the
+  -- 64-byte buffer before the SNES DMA reads the second half.
+  signal CE_CNT       : unsigned(3 downto 0) := (others => '0');
 
 begin
 
-  dec_valid <= dec_valid_r;
-  dec_byte  <= dec_byte_r;
-  idle      <= '1' when dec_state = S_IDLE else '0';
-
-  -- Context index for current bit position (combinational)
-  ctx_idx <= get_ctx(mode, bit_pos);
-
-  -- Evolution table lookup (combinational)
-  evo <= EVOL_TBL(to_integer(ctx_state(to_integer(ctx_idx))));
-
-  process(clk)
-    variable decoded_bit : std_logic;
-    variable is_lps      : std_logic;
-    variable new_state   : unsigned(5 downto 0);
-    variable new_mps     : std_logic;
-    variable p_thresh    : unsigned(15 downto 0);
-    variable new_range   : unsigned(15 downto 0);
-    variable new_code    : unsigned(15 downto 0);
-    -- Renorm variables (all variables so they can be updated in the loop)
-    variable rn_range    : unsigned(15 downto 0);
-    variable rn_code     : unsigned(15 downto 0);
-    variable rn_buf      : std_logic_vector(7 downto 0);
-    variable rn_cnt      : unsigned(2 downto 0);
+  -- Single-edge (rising-only) process replacing the original dual-edge design.
+  -- Cyclone IV has no internal dual-edge flip-flops; the original falling_edge
+  -- clause synthesised as a combinational cloud (~14 cycle paths, -140 ns slack).
+  --
+  -- PHASE='0' = former rising-edge work  (bit decode, ctx update, output pack)
+  -- PHASE='1' = former falling-edge work (range coder, CON/LPS/IN_xxx updates)
+  --
+  -- Throughput: 1 bit per 2 clock cycles instead of 1 per 1.  At 96 MHz this
+  -- gives 48 Mbps decompression, still ~20x faster than the SNES graphics DMA.
+  -- PRELOAD counter increased to 3 (was 2) to fill the 3-stage IN pipeline.
+  process(rst, clk)
+    variable INV          : std_logic;
+    variable PROB         : unsigned(7 downto 0);
+    variable OFFS         : unsigned(7 downto 0);
+    variable MPS          : std_logic;
+    variable A, B, C      : unsigned(3 downto 0);
+    variable SHIFT_POS    : unsigned(2 downto 0);
+    variable NEW_IN_CNT   : unsigned(3 downto 0);
+    variable M2CON        : unsigned(4 downto 0);
+    variable NEW_INVERTS  : unsigned(3 downto 0);
+    variable NEW_LPSS     : unsigned(3 downto 0);
+    variable NEW_OUTPUT   : std_logic_vector(35 downto 0);
+    variable NEW_IN_HIGH  : unsigned(7 downto 0);
+    variable NEW_TOP      : unsigned(7 downto 0);
+    variable NEXT_CON     : unsigned(4 downto 0);
   begin
-    if rising_edge(clk) then
-      -- default pulse deassert
-      fifo_rd <= '0';
-      dec_valid_r <= '0';
+    if rst = '1' then
+      -- Explicit per-element reset; XST does not reliably synthesise
+      -- aggregate assignments of record-element arrays in one clock.
+      for i in 0 to 31 loop
+        CTX_TBL(i).INDEX <= 0;
+        CTX_TBL(i).INV   <= '0';
+      end loop;
+      PIX_CNT       <= (others => '0');
+      BIT_CNT       <= (others => '0');
+      BIT_CNT_LAST  <= (others => '0');
+      INVERTS       <= (others => '0');
+      LPSS          <= (others => '0');
+      LPS           <= '0';
+      SHIFT         <= '0';
+      PROB_BIG_HALF <= '0';
+      OUTPUT        <= (others => '0');
+      TOP           <= (others => '1');
+      IN_HIGH       <= (others => '0');
+      IN_MID        <= (others => '0');
+      IN_LOW        <= (others => '0');
+      IN_CNT        <= (others => '0');
+      DCS           <= DCS_IDLE;
+      LOAD          <= (others => '0');
+      INT_RD        <= '0';
+      INT_WR        <= '0';
+      PHASE         <= '0';
+      CE_CNT        <= (others => '0');
 
-      if rst = '1' or start = '1' then
-        -- Reset context file
-        for i in 0 to 7 loop
-          ctx_state(i) <= (others => '0');
-          ctx_mps(i)   <= '0';
-        end loop;
-        range_r     <= x"8000";
-        code_c      <= (others => '0');
-        bit_buf     <= (others => '0');
-        bit_cnt     <= (others => '0');
-        acc_byte    <= (others => '0');
-        acc_cnt     <= (others => '0');
-        bit_pos     <= (others => '0');
-        load_cnt    <= (others => '0');
-        dec_state   <= S_LOAD;
-        dec_valid_r <= '0';
-      else
-        case dec_state is
+    elsif rising_edge(clk) then
+      -- Pulse defaults (cleared every cycle; overridden selectively below)
+      INT_WR <= '0';
+      INT_RD <= '0';
+      -- Advance CE counter while waiting for Phase 1 slot.
+      -- Phase 0 resets CE_CNT to 0; Phase 1 fires when CE_CNT reaches 14.
+      if PHASE = '1' then
+        CE_CNT <= CE_CNT + 1;
+      end if;
 
-          -- Load two bytes to prime the 16-bit code register (MSB first).
-          -- The SPC7110 range coder initialises code_c from the first two
-          -- compressed bytes: code_c = {byte0, byte1}.
-          when S_LOAD =>
-            if fifo_empty = '0' then
-              fifo_rd <= '1';
-              case load_cnt is
-                when "00" =>
-                  code_c(15 downto 8) <= unsigned(fifo_data);
-                  load_cnt <= "01";
-                when "01" =>
-                  code_c(7 downto 0) <= unsigned(fifo_data);
-                  load_cnt  <= "00";
-                  -- Initial range is 0x8000 (standard binary arithmetic coder)
-                  range_r   <= x"8000";
-                  dec_state <= S_DECODE;
-                when others =>
-                  load_cnt <= "00";
-                  dec_state <= S_DECODE;
-              end case;
+      -- Latch FIFO output byte whenever a read was requested last Phase 1.
+      -- Reads pre-edge INT_RD value; FIFO also advances rptr this same edge.
+      if INT_RD = '1' then
+        IN_BUF <= unsigned(DI);
+      end if;
+
+      if PHASE = '0' then
+        -- --------------------------------------------------------------------
+        -- Phase 0: former rising-edge work
+        -- Reads: CON, LPS, SHIFT, PROB_BIG_HALF  (set by previous Phase 1)
+        -- Writes: OUTPUT, CTX_TBL, LPSS, INVERTS, BIT_CNT, PIX_CNT, INT_WR
+        -- --------------------------------------------------------------------
+        case DCS is
+          when DCS_IDLE => null;
+
+          when DCS_INIT =>
+            -- Register/counter reset; range-coder reset is in Phase 1 DCS_INIT.
+            -- DCS stays INIT so Phase 1 can complete initialisation.
+            -- Explicit per-element loop; XST may drop aggregate record-array resets.
+            for i in 0 to 31 loop
+              CTX_TBL(i).INDEX <= 0;
+              CTX_TBL(i).INV   <= '0';
+            end loop;
+            PIX_CNT      <= (others => '0');
+            BIT_CNT      <= (others => '0');
+            BIT_CNT_LAST <= GetBitMask(MODE);
+            INVERTS      <= (others => '0');
+            LPSS         <= (others => '0');
+            LPS_INV      <= '0';
+            OUTPUT       <= (others => '0');
+            LOAD         <= (others => '0');
+
+          when DCS_PRELOAD =>
+            LOAD <= LOAD + 1;
+            -- Phase-0 increments LOAD; transition fires when current LOAD=3 (LOAD
+            -- will become 4 this cycle but that doesn't matter).  This gives exactly
+            -- 3 Phase-1 DCS_PRELOAD runs, which correctly pipeline:
+            --   Phase-1 run 1: IN_LOW  = FIFO[0]
+            --   Phase-1 run 2: IN_MID  = FIFO[0], IN_LOW  = FIFO[1]
+            --   Phase-1 run 3: IN_HIGH = FIFO[0], IN_MID  = FIFO[1], IN_LOW = FIFO[2]
+            -- When DCS_WORK begins, IN_HIGH holds FIFO[0] — the first compressed byte,
+            -- which is the correct range-coder initial interval value.
+            if LOAD = 3 then
+              DCS <= DCS_WORK;
             end if;
 
-          when S_DECODE =>
-            -- Refill input byte if needed; stall for one cycle
-            if bit_cnt = 0 then
-              if fifo_empty = '0' then
-                fifo_rd <= '1';
-                bit_buf <= fifo_data;
-                bit_cnt <= to_unsigned(8, 3);
-              end if;
-              -- stall: no bits available yet
-            else
-              -- Arithmetic coder: one-bit decode step
-              -- p_thresh = (range[15:8] * p_lps) >> 8  (8-bit approximation)
-              p_thresh := resize(range_r(15 downto 8) * evo.p_lps, 16);
+          when DCS_WORK =>
+            if RUN = '1' and INIT = '0' then
+              INV         := CTX_TBL(to_integer(CON)).INV;
+              NEW_LPSS    := LPSS(2 downto 0) & LPS;
+              NEW_INVERTS := INVERTS(2 downto 0) & INV;
 
-              if code_c < p_thresh then
-                is_lps := '1';
+              if MODE = "01" then
+                NEW_OUTPUT := OUTPUT(33 downto 0) &
+                  std_logic_vector(REAL_ORDER(to_integer(
+                    "00" & NEW_LPSS(1 downto 0) xor "00" & NEW_INVERTS(1 downto 0)))(1 downto 0));
+              elsif MODE = "10" then
+                NEW_OUTPUT := OUTPUT(31 downto 0) &
+                  std_logic_vector(REAL_ORDER(to_integer(
+                    NEW_LPSS(3 downto 0) xor NEW_INVERTS(3 downto 0))));
               else
-                is_lps := '0';
+                MPS        := OUTPUT(15) xor INV;
+                NEW_OUTPUT := OUTPUT(34 downto 0) & (MPS xor LPS);
               end if;
 
-              -- symbol value: XOR with MPS
-              if is_lps = '0' then
-                decoded_bit := ctx_mps(to_integer(ctx_idx));
+              if LPS = '1' and PROB_BIG_HALF = '1' then
+                CTX_TBL(to_integer(CON)).INV <= not CTX_TBL(to_integer(CON)).INV;
+              end if;
+
+              if LPS = '1' then
+                CTX_TBL(to_integer(CON)).INDEX <= GetNextLPS(CON, CTX_TBL);
+              elsif SHIFT = '1' then
+                CTX_TBL(to_integer(CON)).INDEX <= GetNextMPS(CON, CTX_TBL);
+              end if;
+
+              LPSS    <= NEW_LPSS;
+              INVERTS <= NEW_INVERTS;
+              LPS_INV <= LPS xor INV;
+
+              BIT_CNT <= BIT_CNT + 1;
+              if BIT_CNT = BIT_CNT_LAST then
+                OUTPUT  <= NEW_OUTPUT;
+                BIT_CNT <= (others => '0');
+                PIX_CNT <= PIX_CNT + 1;
+                if PIX_CNT = 7 then
+                  DAT_OUT <= NEW_OUTPUT(31 downto 0);
+                  INT_WR  <= '1';
+                end if;
+              end if;
+            end if;
+
+          when others => null;
+        end case;
+        -- Always transition to Phase 1 next cycle (Phase 0 is unconditional).
+        PHASE  <= '1';
+        CE_CNT <= (others => '0');
+
+      elsif CE_CNT = 0 then
+        -- --------------------------------------------------------------------
+        -- Phase 1: former falling-edge work (fires every 2 cycles: Phase 0
+        -- resets CE_CNT=0, so CE_CNT=0 the very next cycle).
+        -- Reads: OUTPUT, LPS_INV, CTX_TBL  (set by previous Phase 0)
+        -- Writes: CON, LPS, SHIFT, TOP, IN_HIGH/MID/LOW/CNT, INT_RD
+        -- --------------------------------------------------------------------
+        case DCS is
+          when DCS_INIT =>
+            -- Range-coder state and pixel-order reset; kick off FIFO preload.
+            CON        <= (others => '0');
+            LPS        <= '0';
+            TOP        <= (others => '0');
+            PIX_ORDER  <= (x"0",x"1",x"2",x"3",x"4",x"5",x"6",x"7",
+                           x"8",x"9",x"A",x"B",x"C",x"D",x"E",x"F");
+            REAL_ORDER <= (x"0",x"1",x"2",x"3",x"4",x"5",x"6",x"7",
+                           x"8",x"9",x"A",x"B",x"C",x"D",x"E",x"F");
+            IN_CNT     <= (others => '0');
+            INT_RD     <= '1';
+            DCS        <= DCS_PRELOAD;  -- transition here so next Phase 0 hits PRELOAD
+
+          when DCS_PRELOAD =>
+            INT_RD  <= '1';
+            IN_LOW  <= IN_BUF;
+            IN_MID  <= IN_LOW;
+            IN_HIGH <= IN_MID;
+
+          when DCS_WORK =>
+            if RUN = '1' and INIT = '0' then
+              if MODE = "01" then
+                A := "00" & unsigned(OUTPUT(3 downto 2));
+                B := "00" & unsigned(OUTPUT(15 downto 14));
+                C := "00" & unsigned(OUTPUT(17 downto 16));
               else
-                decoded_bit := not ctx_mps(to_integer(ctx_idx));
+                A := unsigned(OUTPUT(3 downto 0));
+                B := unsigned(OUTPUT(31 downto 28));
+                C := unsigned(OUTPUT(35 downto 32));
               end if;
 
-              -- Update range and code value
-              if is_lps = '0' then
-                new_range := range_r - p_thresh;
-                new_code  := code_c - p_thresh;
+              if BIT_CNT = 0 then
+                PIX_ORDER  <= Reorder(PIX_ORDER, A);
+                REAL_ORDER <= Reorder(Reorder(Reorder(PIX_ORDER, C), B), A);
+                if MODE = "00" then
+                  case PIX_CNT(1 downto 0) is
+                    when "00"   => NEXT_CON := PIX_CNT(2) & "0000" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0000");
+                    when "01"   => NEXT_CON := PIX_CNT(2) & "0001" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0001");
+                    when "10"   => NEXT_CON := PIX_CNT(2) & "0011" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0011");
+                    when others => NEXT_CON := PIX_CNT(2) & "0111" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0111");
+                  end case;
+                elsif MODE = "01" then
+                  NEXT_CON := "00" & GetDiff(A, B, C);
+                else
+                  NEXT_CON := "00000";
+                end if;
               else
-                new_range := p_thresh;
-                new_code  := code_c;
-              end if;
-
-              -- Renormalize (using variables so shifts accumulate in loop)
-              rn_range := new_range;
-              rn_code  := new_code;
-              rn_buf   := bit_buf;
-              rn_cnt   := bit_cnt;
-              for sh in 0 to 15 loop
-                if rn_range(15) = '0' then
-                  rn_range := rn_range(14 downto 0) & '0';
-                  if rn_cnt > 0 then
-                    rn_code := rn_code(14 downto 0) & rn_buf(7);
-                    rn_buf  := rn_buf(6 downto 0) & '0';
-                    rn_cnt  := rn_cnt - 1;
+                if MODE = "00" then
+                  case PIX_CNT(1 downto 0) is
+                    when "00"   => NEXT_CON := PIX_CNT(2) & "0000" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0000");
+                    when "01"   => NEXT_CON := PIX_CNT(2) & "0001" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0001");
+                    when "10"   => NEXT_CON := PIX_CNT(2) & "0011" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0011");
+                    when others => NEXT_CON := PIX_CNT(2) & "0111" +
+                                     ((INVERTS(3 downto 0) xor LPSS(3 downto 0)) and "0111");
+                  end case;
+                elsif MODE = "01" then
+                  NEXT_CON := ("0" & CON(2 downto 0) & LPS_INV) + 5;
+                else
+                  if LPS_INV = '0' then
+                    M2CON := M2C_TBL(to_integer(CON)).NEXT0;
                   else
-                    -- No bits left — shift in 0 as placeholder; will stall next cycle
-                    rn_code := rn_code(14 downto 0) & '0';
+                    M2CON := M2C_TBL(to_integer(CON)).NEXT1;
+                  end if;
+                  if CON = 1 then
+                    NEXT_CON := M2CON + GetDiff(A, B, C);
+                  else
+                    NEXT_CON := M2CON;
                   end if;
                 end if;
-              end loop;
-              range_r <= rn_range;
-              code_c  <= rn_code;
-              bit_buf <= rn_buf;
-              bit_cnt <= rn_cnt;
-
-              -- Update context: state + MPS
-              if is_lps = '0' then
-                new_state := evo.next_mps;
-                new_mps   := ctx_mps(to_integer(ctx_idx));
-              else
-                new_state := evo.next_lps;
-                if evo.lps_xchg = '1' then
-                  new_mps := not ctx_mps(to_integer(ctx_idx));
-                else
-                  new_mps := ctx_mps(to_integer(ctx_idx));
-                end if;
               end if;
-              ctx_state(to_integer(ctx_idx)) <= new_state;
-              ctx_mps(to_integer(ctx_idx))   <= new_mps;
 
-              -- Accumulate decoded bit into output byte (MSB first)
-              acc_byte <= acc_byte(6 downto 0) & decoded_bit;
-              if acc_cnt = 7 then
-                acc_cnt     <= (others => '0');
-                dec_state   <= S_OUTPUT;
-                dec_byte_r  <= acc_byte(6 downto 0) & decoded_bit;
-                dec_valid_r <= '1';
-                bit_pos     <= bit_pos + 1;
+              CON <= NEXT_CON;
+
+              PROB := GetProb(NEXT_CON, CTX_TBL);
+              OFFS := TOP - PROB;
+              if IN_HIGH < OFFS then
+                NEW_IN_HIGH := IN_HIGH;
+                NEW_TOP     := OFFS;
+                LPS         <= '0';
               else
-                acc_cnt   <= acc_cnt + 1;
-                dec_state <= S_DECODE;
+                NEW_IN_HIGH := IN_HIGH - OFFS;
+                NEW_TOP     := TOP - OFFS;
+                LPS         <= '1';
+              end if;
+
+              SHIFT_POS := GetZeroBitCnt(NEW_TOP);
+              TOP <= shift_left(NEW_TOP, to_integer(SHIFT_POS));
+
+              NEW_IN_CNT := ("0" & IN_CNT) + ("0" & SHIFT_POS);
+              IN_HIGH <= shift_left(NEW_IN_HIGH, to_integer(SHIFT_POS)) or
+                         shift_right(IN_MID, 8 - to_integer(SHIFT_POS));
+
+              if NEW_IN_CNT = 8 then
+                IN_MID <= shift_left(IN_MID, to_integer(SHIFT_POS)) or
+                          shift_right(IN_LOW, 8 - to_integer(SHIFT_POS));
+                IN_LOW <= IN_BUF;
+              elsif NEW_IN_CNT > 8 then
+                IN_MID <= shift_left(IN_MID, to_integer(SHIFT_POS)) or
+                          shift_right(IN_LOW, 8 - to_integer(SHIFT_POS)) or
+                          shift_right(IN_BUF, 8 - to_integer(NEW_IN_CNT(2 downto 0)));
+                IN_LOW <= shift_left(IN_BUF, to_integer(NEW_IN_CNT(2 downto 0)));
+              else
+                IN_MID <= shift_left(IN_MID, to_integer(SHIFT_POS)) or
+                          shift_right(IN_LOW, 8 - to_integer(SHIFT_POS));
+                IN_LOW <= shift_left(IN_LOW, to_integer(SHIFT_POS));
+              end if;
+
+              IN_CNT <= NEW_IN_CNT(2 downto 0);
+
+              if NEW_IN_CNT(3) = '1' then
+                INT_RD <= '1';
+              end if;
+
+              if SHIFT_POS > 0 then SHIFT <= '1'; else SHIFT <= '0'; end if;
+
+              if PROB > x"55" then
+                PROB_BIG_HALF <= '1';
+              else
+                PROB_BIG_HALF <= '0';
               end if;
             end if;
 
-          when S_OUTPUT =>
-            -- Hold valid until consumer acknowledges
-            dec_valid_r <= '1';
-            if dec_ack = '1' then
-              dec_valid_r <= '0';
-              dec_state   <= S_DECODE;
-            end if;
-
-          when S_IDLE =>
-            null;
-
-          when others =>
-            dec_state <= S_IDLE;
+          when others => null;
         end case;
+        -- Return to Phase 0 next cycle.
+        PHASE <= '0';
+
+      else
+        null;  -- Phase 1 wait slot: CE_CNT incrementing at top of process
       end if;
+
+      -- INIT override: catches INIT pulse on either phase.
+      -- Force PHASE='0' and CE_CNT=0 so that Phase 0 DCS_INIT (which clears
+      -- CTX_TBL and sets BIT_CNT_LAST from MODE) always runs BEFORE Phase 1
+      -- DCS_INIT (which resets the range-coder and reads the first FIFO byte).
+      -- Without this, if INIT fires while PHASE='0' the Phase 0 block already
+      -- scheduled PHASE<='1', so Phase 1 DCS_INIT would fire next clock and
+      -- transition to DCS_PRELOAD before Phase 0 DCS_INIT ever executed --
+      -- leaving CTX_TBL un-cleared and BIT_CNT_LAST wrong for the new MODE.
+      if INIT = '1' then
+        DCS    <= DCS_INIT;
+        PHASE  <= '0';              -- ensure Phase 0 DCS_INIT runs first
+        CE_CNT <= (others => '0');  -- restart Phase-1 countdown from clean state
+      end if;
+
     end if;
   end process;
+
+  RD <= INT_RD;
+  WR <= INT_WR;
 
 end architecture rtl;

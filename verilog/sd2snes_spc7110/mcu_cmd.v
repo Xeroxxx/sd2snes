@@ -91,7 +91,20 @@ module mcu_cmd(
   output reg cheat_pgm_we_out,
 
   // DSP core features
-  output reg [15:0] dsp_feat_out = 16'h0000
+  output reg [15:0] dsp_feat_out = 16'h0000,
+
+  // RTC-4513 time load (command 0xE5)
+  // Fires a 1-clock strobe on rtc_time_load when all 7 BCD bytes have been
+  // received.  rtc_time format (same as SPI 0xE5 payload, MSB first):
+  //   [55:48] yr_thousands & yr_hundreds  (e.g. 0x20 = 20xx)
+  //   [47:40] yr_tens & yr_ones
+  //   [39:32] mon_tens & mon_ones
+  //   [31:24] day_tens & day_ones
+  //   [23:16] hr_tens  & hr_ones
+  //   [15:8]  min_tens & min_ones
+  //   [7:0]   sec_tens & sec_ones
+  output reg        rtc_time_load = 1'b0,
+  output reg [55:0] rtc_time      = 56'h0
 );
 
 initial begin
@@ -112,6 +125,8 @@ reg msu_status_reset_we_buf = 0;
 reg MSU_RESET_OUT_BUF;
 
 reg [7:0] MCU_DATA_OUT_BUF;
+
+reg [55:0] rtc_time_buf = 56'h0;  // accumulates 0xE5 time bytes
 reg [7:0] MCU_DATA_IN_BUF;
 reg [2:0] mcu_nextaddr_buf;
 
@@ -286,6 +301,23 @@ always @(posedge clk) begin
             MSU_PTR_OUT_BUF[7:0] <= param_data;
             MSU_RESET_OUT_BUF <= 1'b1;
           end
+        endcase
+      8'he5: // set RTC time (SPC7110 BCD format, 7 bytes + 1 dummy)
+        // eg. 0xE5 0x20 0x26 0x04 0x04 0x00 0x00 0x00 0x00
+        //       -> 2026-04-04 00:00:00
+        case (spi_byte_cnt)
+          32'h2: rtc_time_buf[55:48] <= param_data;  // yr_th, yr_hh
+          32'h3: rtc_time_buf[47:40] <= param_data;  // yr_t,  yr_o
+          32'h4: rtc_time_buf[39:32] <= param_data;  // mo_t,  mo_o
+          32'h5: rtc_time_buf[31:24] <= param_data;  // dy_t,  dy_o
+          32'h6: rtc_time_buf[23:16] <= param_data;  // h_t,   h_o
+          32'h7: rtc_time_buf[15:8]  <= param_data;  // mn_t,  mn_o
+          32'h8: begin
+            rtc_time_buf[7:0] <= param_data;          // s_t,   s_o
+            rtc_time      <= {rtc_time_buf[55:8], param_data};
+            rtc_time_load <= 1'b1;  // pulse: latch into rtc4513_emu next cycle
+          end
+          32'h9: rtc_time_load <= 1'b0;  // clear pulse after dummy byte
         endcase
       8'hec:
         begin // set DAC properties

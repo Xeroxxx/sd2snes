@@ -18,7 +18,10 @@ void yaml_file_open(char *filename, uint8_t ff_flags) {
     return;
   }
   file_open((uint8_t*)filename, ff_flags);
-  if(file_res) return;
+  if(file_res) {
+    ystate.flags = 0; /* clear any stale YAML_FLAG_BUF_EMPTY to prevent spurious f_gets on invalid handle */
+    return;
+  }
   ystate.flags = YAML_FLAG_FILE_OPEN | YAML_FLAG_BUF_EMPTY;
   ystate.ff_flags = ff_flags;
   ystate.depth = 0;
@@ -30,8 +33,12 @@ void yaml_file_open(char *filename, uint8_t ff_flags) {
 }
 
 void yaml_file_close() {
-  file_close();
-  ystate.flags &= ~YAML_FLAG_FILE_OPEN;
+  if(ystate.flags & YAML_FLAG_FILE_OPEN) {
+    file_close();
+    ystate.flags &= ~YAML_FLAG_FILE_OPEN;
+  }
+  /* clear any stale buffering flag so the next yaml_file_open starts clean */
+  ystate.flags &= ~YAML_FLAG_BUF_EMPTY;
 }
 
 yaml_token_type yaml_detect_value(char **token, yaml_token_t *tok) {

@@ -7,6 +7,7 @@
 #include "fileops.h"
 #include "cfg.h"
 #include "config.h"
+#include "dbglog.h"
 
 static uint16_t led_bright[16]={60000, 59920, 59871, 59794,
                                 59669, 59469, 59148, 58633,
@@ -150,6 +151,9 @@ void led_error() {
   if(file_res != last_file_res) {
     led_error_count = file_res;
     saved_error_count = led_error_count;
+    /* log the capture — runs in SysTick ISR so we only queue into buffer,
+       the next file_open/close in main context will trigger flush */
+    dbglog("LED CAPTURE: file_res %d -> %d", last_file_res, file_res);
     last_file_res = file_res;
   }
   if(led_error_count || (led_error_state == 2)) {

@@ -4,8 +4,8 @@
 //
 // Handles the SPC7110 memory map for sd2snes:
 //
-//   PROM ($C0-$CF:$0000-$FFFF, $80-$8F:$8000-$FFFF):
-//     PSRAM $000000 + SNES_ADDR[19:0]
+// PROM ($C0-$CF:$0000-$FFFF, $80-$BF:$8000-$FFFF, $00-$3F:$8000-$FFFF mirror):
+//     PSRAM {1'b0, ~SNES_ADDR[23], SNES_ADDR[21:0]} & ROM_MASK
 //
 //   DROM ($D0-$DF/$E0-$EF/$F0-$FF, bank-mapped via $4831-$4833):
 //     Decoded in SPC7110.vhd / SPC7110Map.vhd; this module marks access as ROM_HIT.
@@ -55,9 +55,11 @@ parameter [2:0]
 // Classification of each region
 //--------------------------------------------------------------------
 
-// PROM: $C0-$CF full 64KB each, or $80-$8F upper 32KB ($8000-$FFFF)
+// PROM: $C0-$CF full 64KB each; $80-$BF upper 32KB ($8000-$FFFF);
+//       and standard HiROM mirror $00-$3F:$8000-$FFFF.
+//       Bit 22 is 0 for both $00-$3F and $80-$BF, 1 for $40-$7F and $C0-$FF.
 wire is_prom_full  = (SNES_ADDR[23:20] == 4'hC);
-wire is_prom_hi    = (SNES_ADDR[23:20] == 4'h8) && SNES_ADDR[15];
+wire is_prom_hi    = (SNES_ADDR[22] == 1'b0) && SNES_ADDR[15];  // $00-$3F + $80-$BF, $8000-$FFFF
 
 // DROM: $D0-$FF (three 16-bank windows, bank-mapped by $4831-$4833)
 wire is_drom       = (SNES_ADDR[23:20] == 4'hD) ||
@@ -95,13 +97,18 @@ assign ROM_HIT    = IS_ROM | IS_SAVERAM;
 
 //--------------------------------------------------------------------
 // ROM_ADDR computation
-// PROM: PSRAM $000000 + {4'b0, SNES_A[19:0]}
+// PROM: {1'b0, ~SNES_ADDR[23], SNES_ADDR[21:0]} & ROM_MASK
+//       (folds $00-$3F mirrors to same locations as $80-$BF)
 // DROM: bank-mapped in SPC7110Map.vhd; expose raw SNES addr here,
 //       SPC7110Map will override with {bank, SNES_A[19:0]}.
 // SRAM: PSRAM $E00000 + (offset & SAVERAM_MASK)
 //--------------------------------------------------------------------
 wire [23:0] sram_psram_addr = 24'hE00000 + (SNES_ADDR[20:0] & SAVERAM_MASK[20:0]);
-wire [23:0] prom_psram_addr = {4'b0000, SNES_ADDR[19:0]};
+// SPC7110 HiROM PROM is exactly 1MB ($C0-$CF × 64KB).
+// All three mirror groups ($C0-$CF, $80-$8F, $00-$0F) share the same bits[19:0]:
+//   bits[19:16] = bank index within PROM (0-15), bits[15:0] = offset within bank.
+// Using bits[19:0] directly maps all mirrors to the same PSRAM[0-1MB] range.
+wire [23:0] prom_psram_addr = ({4'b0000, SNES_ADDR[19:0]}) & ROM_MASK;
 
 assign ROM_ADDR = IS_SAVERAM  ? sram_psram_addr :
                   IS_ROM      ? prom_psram_addr  :

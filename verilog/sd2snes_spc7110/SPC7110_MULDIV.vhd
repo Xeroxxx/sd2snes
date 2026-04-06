@@ -10,9 +10,14 @@
 -- Multiply is triggered by writing to $4825; divide by writing to $4827.
 -- The ALU runs over 30 cycles (multiply) or 40 cycles (divide) to match
 -- real SPC7110 timing observed in FEoEZ.
--- This module uses only IEEE.NUMERIC_STD operators — no Altera LPM.
--- It synthesizes correctly on both Altera Cyclone IV (MK3) and Xilinx
--- Spartan-3 (MK2).
+--
+-- Division uses a sequential shift-and-subtract (restoring) state machine:
+-- one step per clock, 32 steps total, result available after ~33 clocks.
+-- This replaces the former fully-unrolled for-loop that synthesised to
+-- ~1400 LUTs and exceeded the XC3S400 resource limit (3584 slices).
+-- The shift-register form needs only ~50 combinational LUTs + ~100 FFs,
+-- and is accepted by both Xilinx XST (Spartan-3/MK2) and Quartus (Cyclone
+-- IV/MK3).  The 32-step divide completes inside the 40-cycle busy window.
 ----------------------------------------------------------------------------------
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -41,13 +46,29 @@ entity SPC7110_MULDIV is
 end entity SPC7110_MULDIV;
 
 architecture rtl of SPC7110_MULDIV is
-  signal countdown : unsigned(5 downto 0) := (others => '0');
-  signal running   : std_logic := '0';
+  -- timing / busy control
+  signal countdown   : unsigned(6 downto 0) := (others => '0');
+  signal running     : std_logic := '0';
+  signal mode_div_r  : std_logic := '0';
 
+  -- result registers
   signal res_lo  : std_logic_vector(15 downto 0) := (others => '0');
   signal res_hi  : std_logic_vector(15 downto 0) := (others => '0');
   signal res_rem : std_logic_vector(15 downto 0) := (others => '0');
   signal res_sgn : std_logic := '0';
+
+  -- Sequential divide state machine registers.
+  -- div_step encoding:
+  --   33..63 : idle (no operation)
+  --   32..1  : active iteration (processing bit div_step-1 of quotient)
+  --   0      : finalize (apply sign correction, write results)
+  signal div_step  : unsigned(5 downto 0)  := to_unsigned(33, 6);
+  signal div_reg   : unsigned(31 downto 0) := (others => '0'); -- dividend shift reg
+  signal dvr17_reg : unsigned(16 downto 0) := (others => '0'); -- 17-bit extended divisor
+  signal acc_reg   : unsigned(16 downto 0) := (others => '0'); -- partial remainder
+  signal q32v_reg  : unsigned(31 downto 0) := (others => '0'); -- quotient shift reg
+  signal neg_dd_r  : std_logic := '0';  -- latched: dividend was negative
+  signal neg_dr_r  : std_logic := '0';  -- latched: divisor was negative
 
 begin
   result_lo <= res_lo;
@@ -57,38 +78,36 @@ begin
   busy      <= running;
 
   process(clk)
-    variable a32  : signed(31 downto 0);
-    variable b16  : signed(15 downto 0);
-    variable u32  : unsigned(31 downto 0);
-    variable ua16 : unsigned(15 downto 0);
-    variable ub16 : unsigned(15 downto 0);
-    variable q32  : unsigned(31 downto 0);
-    variable r16  : unsigned(15 downto 0);
-    variable sq32 : signed(31 downto 0);
-    variable ua32 : unsigned(31 downto 0);
-    variable d32hi: unsigned(15 downto 0);
-    variable d32lo: unsigned(15 downto 0);
-    variable div_u : unsigned(31 downto 0);
-    variable dvr_u : unsigned(15 downto 0);
+    variable ua16    : unsigned(15 downto 0);
+    variable ub16    : unsigned(15 downto 0);
+    variable u32     : unsigned(31 downto 0);
+    variable a32     : signed(31 downto 0);
+    variable div_u   : unsigned(31 downto 0);
+    variable dvr_u   : unsigned(15 downto 0);
+    variable new_acc : unsigned(16 downto 0);
+    variable sq32v   : signed(31 downto 0);
+    variable srem16v : signed(15 downto 0);
   begin
     if rising_edge(clk) then
       if rst = '1' then
         running   <= '0';
         countdown <= (others => '0');
+        div_step  <= to_unsigned(33, 6);
+
       elsif start = '1' and running = '0' then
-        running   <= '1';
-        -- latency: 30 cycles for multiply, 40 for divide
+        running    <= '1';
+        mode_div_r <= mode_div;
         if mode_div = '1' then
-          countdown <= to_unsigned(40, 6);
+          countdown <= to_unsigned(40, 7);
         else
-          countdown <= to_unsigned(30, 6);
+          countdown <= to_unsigned(30, 7);
         end if;
-        -- Compute result immediately (combinational result registered here).
-        -- The countdown provides the timing illusion; game code polls $482F.
+
         if mode_div = '0' then
-          -- MULTIPLY
+          -- ----------------------------------------------------------------
+          -- MULTIPLY (16×16 → 32; XST infers MULT18X18 primitive)
+          -- ----------------------------------------------------------------
           if mode_sign = '0' then
-            -- unsigned 16x16 → 32-bit product
             ua16 := unsigned(multiplicand);
             ub16 := unsigned(multiplier);
             u32  := ua16 * ub16;
@@ -97,45 +116,93 @@ begin
             res_rem <= (others => '0');
             res_sgn <= '0';
           else
-            -- signed 16x16 → 32-bit product
-            a32 := resize(signed(multiplicand), 32) * resize(signed(multiplier), 32);
+            a32 := signed(multiplicand) * signed(multiplier);
             res_lo  <= std_logic_vector(a32(15 downto 0));
             res_hi  <= std_logic_vector(a32(31 downto 16));
             res_rem <= (others => '0');
             res_sgn <= a32(31);
           end if;
+          div_step <= to_unsigned(33, 6);  -- idle
+
         else
-          -- DIVIDE
-          d32hi := unsigned(dividend_hi);
-          d32lo := unsigned(dividend_lo);
-          div_u := d32hi & d32lo;
+          -- ----------------------------------------------------------------
+          -- DIVIDE: preload shift-register pipeline.
+          --   acc_reg and q32v_reg shift left each clock in the running
+          --   branch, MSB of div_reg feeding into the partial remainder.
+          --   After 32 steps the quotient appears in q32v_reg and the
+          --   final remainder in acc_reg(15:0).  One extra cycle (step=0)
+          --   applies sign correction and commits the result registers.
+          -- ----------------------------------------------------------------
+          div_u := unsigned(dividend_hi) & unsigned(dividend_lo);
           dvr_u := unsigned(divisor);
+
           if dvr_u = 0 then
-            -- division by zero: saturate
-            res_lo  <= (others => '1');
-            res_hi  <= (others => '1');
-            res_rem <= std_logic_vector(d32lo);
-            res_sgn <= '0';
-          elsif mode_sign = '0' then
-            -- unsigned 32÷16
-            q32 := div_u / dvr_u;
-            r16 := resize(div_u mod dvr_u, 16);
-            res_lo  <= std_logic_vector(q32(15 downto 0));
-            res_hi  <= std_logic_vector(q32(31 downto 16));
-            res_rem <= std_logic_vector(r16);
-            res_sgn <= '0';
+            -- Division by zero: saturate quotient, remainder = dividend_lo
+            res_lo   <= (others => '1');
+            res_hi   <= (others => '1');
+            res_rem  <= dividend_lo;
+            res_sgn  <= '0';
+            div_step <= to_unsigned(33, 6);  -- skip all iterate/finalize steps
           else
-            -- signed 32÷16
-            a32  := signed(div_u);
-            b16  := signed(dvr_u);
-            sq32 := resize(a32 / resize(b16, 32), 32);
-            res_lo  <= std_logic_vector(sq32(15 downto 0));
-            res_hi  <= std_logic_vector(sq32(31 downto 16));
-            res_rem <= std_logic_vector(resize(a32 mod resize(b16, 32), 16));
-            res_sgn <= sq32(31);
+            -- Latch sign flags before taking absolute values
+            neg_dd_r <= mode_sign and div_u(31);
+            neg_dr_r <= mode_sign and divisor(15);
+            -- Compute |dividend| and |divisor| for the iterate phase
+            if mode_sign = '1' and div_u(31) = '1' then
+              div_reg <= unsigned(-signed(div_u));
+            else
+              div_reg <= div_u;
+            end if;
+            if mode_sign = '1' and divisor(15) = '1' then
+              dvr17_reg <= '0' & unsigned(-signed(dvr_u));
+            else
+              dvr17_reg <= '0' & dvr_u;
+            end if;
+            acc_reg  <= (others => '0');
+            q32v_reg <= (others => '0');
+            div_step <= to_unsigned(32, 6);  -- start 32 iterations
           end if;
         end if;
+
       elsif running = '1' then
+        -- ----------------------------------------------------------------
+        -- Sequential divide state machine (one step per clock)
+        -- ----------------------------------------------------------------
+        if mode_div_r = '1' then
+          if div_step > 0 and div_step <= 32 then
+            -- Shift MSB of dividend into the 17-bit partial remainder
+            new_acc := acc_reg(15 downto 0) & div_reg(31);
+            if new_acc >= dvr17_reg then
+              acc_reg  <= new_acc - dvr17_reg;
+              q32v_reg <= q32v_reg(30 downto 0) & '1';
+            else
+              acc_reg  <= new_acc;
+              q32v_reg <= q32v_reg(30 downto 0) & '0';
+            end if;
+            div_reg  <= div_reg(30 downto 0) & '0';  -- shift dividend
+            div_step <= div_step - 1;
+
+          elsif div_step = 0 then
+            -- All 32 bits processed; apply sign correction and commit
+            if neg_dd_r /= neg_dr_r then
+              sq32v := -signed(q32v_reg);
+            else
+              sq32v := signed(q32v_reg);
+            end if;
+            if neg_dd_r = '1' then
+              srem16v := -signed(acc_reg(15 downto 0));
+            else
+              srem16v := signed(acc_reg(15 downto 0));
+            end if;
+            res_lo  <= std_logic_vector(sq32v(15 downto 0));
+            res_hi  <= std_logic_vector(sq32v(31 downto 16));
+            res_rem <= std_logic_vector(srem16v);
+            res_sgn <= sq32v(31);
+            div_step <= to_unsigned(33, 6);  -- idle sentinel, won't re-enter
+          end if;
+        end if;
+
+        -- Countdown / busy management (runs every running cycle)
         if countdown = 0 then
           running <= '0';
         else

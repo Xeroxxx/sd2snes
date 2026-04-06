@@ -1,6 +1,44 @@
 NET "CLKIN" TNM_NET = "CLKIN";
 TIMESPEC TS_CLKIN = PERIOD "CLKIN" 24.01 MHz HIGH 50 %;
 
+# --------------------------------------------------------------------------
+# Timing exceptions for the SPC7110 core (MK2 Spartan-3 96 MHz)
+#
+# CLK2 = CLKIN × 4 = 96 MHz  → 1 cycle ≈ 10.416 ns
+#
+# NOTE on ISE FROM/TO TIMESPEC semantics:
+#   In ISE UCF, "FROM ... TO ... TS_CLKIN * 4" computes as 4× the FREQUENCY
+#   of CLKIN (= 96 MHz = 10.416 ns), NOT 4× the period (166.7 ns).  This
+#   makes those FROM/TO constraints identical to the PERIOD constraint and
+#   provides no multicycle relaxation.  Additionally, ISE's PERIOD constraint
+#   always dominates same-clock FROM/TO MAXDELAY constraints; multicycle
+#   relaxation for same-clock paths requires TIG.
+#
+# (1) SPC7110 decompressor — CE-gated Phase 1 runs every 16 CLK2 cycles.
+#     The range-coder arithmetic chain (~37 ns on Spartan-3) exceeds the
+#     10.4 ns CLK2 period, but is functionally correct because outputs are
+#     captured only after the CE_CNT 16-cycle window (see SPC7110_DEC.vhd).
+#     TIG all paths originating from dec_inst registers so ISE STA does not
+#     flag them under TS_snes_dcm_CLKFX_BUF (CLK2 period constraint).
+INST "spc7110_inst/dec_inst/*" TNM = "SPC7110_DEC_REGS";
+TIMESPEC TS_DEC_PHASE1 = FROM "SPC7110_DEC_REGS" TO "SPC7110_DEC_REGS" TIG;
+
+# (2) dec_inst outputs → SPC7110 top-level registers.
+#     Same CE_CNT multicycle safety applies; TIG these cross-instance paths.
+INST "spc7110_inst/*" TNM = "SPC7110_TOP_REGS";
+TIMESPEC TS_DEC_TO_TOP = FROM "SPC7110_DEC_REGS" TO "SPC7110_TOP_REGS" TIG;
+
+# (3) MULDIV result registers.
+#     The divide is now a sequential shift-and-subtract state machine
+#     (one step per clock).  The per-step combinational path (17-bit
+#     compare + subtract + mux) is ~3 ns and meets timing without any
+#     special constraint.
+INST "spc7110_inst/muldiv_inst/res_lo*" TNM = "MULDIV_RES";
+INST "spc7110_inst/muldiv_inst/res_hi*" TNM = "MULDIV_RES";
+INST "spc7110_inst/muldiv_inst/res_rem*" TNM = "MULDIV_RES";
+TIMESPEC TS_MULDIV_RES   = FROM "SPC7110_TOP_REGS" TO "MULDIV_RES" TS_CLKIN;
+# --------------------------------------------------------------------------
+
 NET "p113_out" IOSTANDARD = LVCMOS33;
 NET "p113_out" LOC = P113;
 

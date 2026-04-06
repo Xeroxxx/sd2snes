@@ -266,6 +266,7 @@ void save_backup_state() {
   append_file_basename(line, (char*)file_lfn, extend, sizeof(line));
 
   save_sram((uint8_t*) line, 0x50000L, 0xF00000L);
+  file_res = FR_OK; /* soft fail: state save errors should not persist in LED */
   // clear the busy bit in the slot
   sram_writebyte(slot, SS_SLOTS_ADDR);
 }
