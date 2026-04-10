@@ -28,7 +28,6 @@
 #include "sysinfo.h"
 #include "cfg.h"
 #include "savestate.h"
-#include "dbglog.h"
 
 //usb
 #include "usb.h"
@@ -192,16 +191,10 @@ int main(void) {
     cic_init(0);
 
     if(firstboot) {
-      dbglog_init();
-      dbglog("firstboot: SD card ready, starting init sequence");
       cfg_load();
-      dbglog_flush();
       cfg_save();
-      dbglog_flush();
       cfg_validity_check_recent_games();
-      dbglog_flush();
       cfg_validity_check_favorite_games();
-      dbglog_flush();
     }
     if(fpga_config != FPGA_BASE) fpga_pgm((uint8_t*)FPGA_BASE);
     cfg_dump_recent_games_for_snes(SRAM_LASTGAME_ADDR);
@@ -302,14 +295,8 @@ int main(void) {
         case SNES_CMD_LOADROM:
           get_selected_name(file_lfn);
           printf("Selected name: %s\n", file_lfn);
-          dbglog_set_context("LOADROM");
-          dbglog("Loading ROM: %s", file_lfn);
-          dbglog_flush();
           cfg_add_last_game(file_lfn);
-          dbglog_flush();
           filesize = load_rom(file_lfn, SRAM_ROM_ADDR, LOADROM_WITH_SRAM | LOADROM_WITH_RESET | LOADROM_WAIT_SNES);
-          dbglog_set_context(NULL);
-          dbglog_flush();
           break;
         case SNES_CMD_SETRTC:
           /* get time from RAM */

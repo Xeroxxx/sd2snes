@@ -29,7 +29,6 @@
 #include "ff.h"
 #include "fileops.h"
 #include "diskio.h"
-#include "dbglog.h"
 
 #include <string.h>
 #include <stdarg.h>
@@ -72,17 +71,10 @@ void file_open(const uint8_t* filename, BYTE flags) {
   file_block_max = sizeof(file_buf);
   file_status = file_res ? FILE_ERR : FILE_OK;
   print_fresult(file_res, "file_open (%s, %02x)", filename, flags);
-  dbglog("OPEN  flags=%02x res=%d(%s) file=%s", flags, file_res,
-         (file_res < 20 ? fresult_names[file_res] : "?"), filename);
-  if(file_res) dbglog_flush();
 }
 
 void file_close() {
-  FRESULT pre = file_res; /* capture caller's res before we overwrite */
   file_res = f_close(&file_handle);
-  dbglog("CLOSE res=%d(%s) [pre=%d]", file_res,
-         (file_res < 20 ? fresult_names[file_res] : "?"), pre);
-  if(file_res) dbglog_flush();
 }
 
 void file_seek(uint32_t offset) {
