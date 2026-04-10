@@ -311,6 +311,17 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
     printf("reconfigure FPGA with %s...\n", fpga_conf);
     fpga_pgm((uint8_t*)fpga_conf);
     fpga_set_features(fpga_features_preload);
+    /* Inject real time into the SPC7110 RTC emulator immediately after
+     * FPGA load so that the RTC never presents the invalid BCD calendar
+     * values that the initial block defaults to (month=0x00, day=0x00).
+     * Both the blank-SRAM (Mode 0) and saved-SRAM (Mode 1) paths are safe:
+     *   Mode 0: game detects blank SRAM via the SRAM magic bytes, not via
+     *           the RTC state; it runs setup and overwrites SRAM/time anyway.
+     *   Mode 1: game reads the live RTC and uses elapsed-time calculation;
+     *           a valid current time prevents the month=0 infinite-retry hang. */
+    if(romprops.has_spc7110) {
+      set_fpga_time(get_bcdtime());
+    }
   }
   if(flags & LOADROM_WAIT_SNES) snes_set_snes_cmd(0x77);
   set_mcu_addr(base_addr + romprops.load_address);
