@@ -83,7 +83,9 @@
 #define CMD_SET_AUTOBOOT_ROM        $15 /* set autoboot from file browser */
 #define CMD_SET_AUTOBOOT_FAV        $16 /* set autoboot from favorites (index in MCU_PARAM) */
 #define CMD_CLR_AUTOBOOT_ROM        $17 /* clear autoboot ROM setting */
-#define CMD_LOAD_AUTOBOOT           $18 /* trigger autoboot at cold boot */
+#define CMD_LOAD_AUTOBOOT           $18
+#define CMD_SET_MENU_MUSIC          $19
+#define CMD_LOAD_MENU_MUSIC         $1A /* trigger autoboot at cold boot */
 #define CMD_SAVESTATE               $40
 #define CMD_LOADSTATE               $41
 #define CMD_MCU_RDY                 $55
@@ -138,6 +140,8 @@
 #define CFG_SHOW_TRIBUTE                CFG_ADDR+$00B3
 #define CFG_ENABLE_AUTOSAVE             CFG_ADDR+$00B4
 #define CFG_ENABLE_AUTOSAVE_MSU1        CFG_ADDR+$00B5
+#define CFG_MENU_MUSIC_ENABLED          CFG_ADDR+$00B6
+#define CFG_MENU_MUSIC_VOLUME           CFG_ADDR+$00B7
 
 #define MENU_ENTRY_SIZE             23
 

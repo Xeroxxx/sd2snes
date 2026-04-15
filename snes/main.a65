@@ -60,6 +60,7 @@ GAME_MAIN:
   sta tgt_bright
   sta menu_brightness
   sta $2100
+  jsr music_start_background
   jmp @set_bank ; Set bios bank, just to be sure
 set_bank:
   plp           ; Restore processor state
@@ -109,6 +110,7 @@ autoboot_start_poll:
 coldboot_bypass_autoboot:         ; clear autoboot flag, continue to menu
   jsr clr_autoboot_at_boot
 coldboot_autoboot_out:
+  jsr music_start_background
   jsr screen_on
   jsr filesel_init
   sep #$20 : .as

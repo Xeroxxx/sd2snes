@@ -343,6 +343,35 @@ menu_enttab_browser:
 ; .byt  0,0,0
 ; .byt  0,0,0
 
+ .byt  MTYPE_VALUE
+ .word !mtext_browser_menu_music
+ .byt  ^mtext_browser_menu_music
+ .word !kv_onoff
+ .byt  ^kv_onoff
+ .byt  OPTTYPE_KVBYTE
+ .word !CFG_MENU_MUSIC_ENABLED
+ .byt  ^CFG_MENU_MUSIC_ENABLED
+ .word !mdesc_browser_menu_music
+ .byt  ^mdesc_browser_menu_music
+ .byt  0,0,0
+ .byt  0,0,0
+ .byt  0,0,0
+
+ .byt  MTYPE_VALUE
+ .word !mtext_browser_music_volume
+ .byt  ^mtext_browser_music_volume
+ .word !opt_0_to_100
+ .byt  ^opt_0_to_100
+ .byt  OPTTYPE_BYTE
+ .word !CFG_MENU_MUSIC_VOLUME
+ .byt  ^CFG_MENU_MUSIC_VOLUME
+ .word !mdesc_browser_music_volume
+ .byt  ^mdesc_browser_music_volume
+ .byt  0,0,0
+ .byt  0,0,0
+ .word !(mfunc_isenabled_menu_music-1)
+ .byt  ^(mfunc_isenabled_menu_music-1)
+
  .byt 0
 
 menu_enttab_chip:
@@ -807,6 +836,27 @@ menu_enttab_filesel_context_file:
 
  .byt  0
 
+menu_enttab_filesel_context_spc:
+; HEADER
+ .byt  1              ; listsel_step=1
+ .word !text_filesel_selected_file ; window title
+ .byt  ^text_filesel_selected_file ; for this menu
+; ENTRIES
+ .byt  MTYPE_FUNC_CLOSE
+ .word !text_filesel_context_set_menu_music
+ .byt  ^text_filesel_context_set_menu_music
+ .word !set_as_menu_music-1
+ .byt  ^set_as_menu_music-1
+ .byt  0
+ .byt  0,0,0
+ .word !mdesc_filesel_context_set_menu_music
+ .byt  ^mdesc_filesel_context_set_menu_music
+ .byt  0,0,0
+ .byt  0,0,0
+ .byt  0,0,0
+
+ .byt  0
+
 menu_enttab_filesel_favorites_context:
 ; HEADER
  .byt  1              ; listsel_step=1
@@ -890,6 +940,12 @@ mfunc_isenabled_scic:
 
 mfunc_isenabled_autosave:
   lda @CFG_ENABLE_AUTOSAVE
+  eor #$ff
+  ror
+  rtl
+
+mfunc_isenabled_menu_music:
+  lda @CFG_MENU_MUSIC_ENABLED
   eor #$ff
   ror
   rtl
@@ -1003,6 +1059,9 @@ kv_savestates:
 
 opt_0_to_30:
 .word $0000, $001E
+
+opt_0_to_100:
+.word $0000, $0064
 
 opt_1_to_2:
 .word $0001, $0002

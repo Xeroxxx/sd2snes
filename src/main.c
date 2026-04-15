@@ -318,6 +318,24 @@ int main(void) {
           filesize = load_spc(file_lfn, SRAM_SPC_DATA_ADDR, SRAM_SPC_HEADER_ADDR);
           cmd=0; /* stay in menu loop */
           break;
+        case SNES_CMD_SET_MENU_MUSIC:
+          /* save selected SPC file as menu background music */
+          get_selected_name(file_lfn);
+          printf("Set menu music: %s\n", file_lfn);
+          strncpy((char*)CFG.menu_music_file, (char*)file_lfn, sizeof(CFG.menu_music_file)-1);
+          CFG.menu_music_file[sizeof(CFG.menu_music_file)-1] = 0;
+          CFG.menu_music_enabled = 1;
+          cfg_save();
+          cfg_load_to_menu();
+          cmd=0; /* stay in menu loop */
+          break;
+        case SNES_CMD_LOAD_MENU_MUSIC:
+          /* load configured menu music SPC into SRAM for background playback */
+          if(CFG.menu_music_file[0]) {
+            load_spc((uint8_t*)CFG.menu_music_file, SRAM_SPC_DATA_ADDR, SRAM_SPC_HEADER_ADDR);
+          }
+          cmd=0; /* stay in menu loop */
+          break;
         case SNES_CMD_RESET:
           /* process RESET request from SNES */
           printf("RESET requested by SNES\n");

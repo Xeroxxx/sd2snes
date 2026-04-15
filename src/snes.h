@@ -48,6 +48,8 @@
 #define SNES_CMD_SET_AUTOBOOT_FAV    (0x16) /* set autoboot from favorites list (index in MCU_PARAM) */
 #define SNES_CMD_CLR_AUTOBOOT_ROM    (0x17) /* clear autoboot ROM setting */
 #define SNES_CMD_LOAD_AUTOBOOT       (0x18) /* boot into the stored autoboot ROM */
+#define SNES_CMD_SET_MENU_MUSIC      (0x19) /* set menu background music SPC file */
+#define SNES_CMD_LOAD_MENU_MUSIC     (0x1a) /* load configured menu music SPC into SRAM */
 
 #define SNES_CMD_SAVESTATE           (0x40)
 #define SNES_CMD_LOADSTATE           (0x41)

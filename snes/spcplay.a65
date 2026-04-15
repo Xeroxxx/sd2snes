@@ -680,3 +680,82 @@ exec_instr:
   phd
   pld
   rts
+
+;---------------------------------------
+; Scale SPC DSP master volume registers (MVOLL=$0C, MVOLR=$1C) by
+; CFG_MENU_MUSIC_VOLUME percentage (0-100) before upload.
+; Patches the values in SRAM (SPC_DSP_REGS) in-place.
+music_scale_dsp_mvol:
+  php
+  sep #$20 : .as
+  lda @CFG_MENU_MUSIC_VOLUME
+  cmp #100
+  beq music_scale_done         ; volume=100: no change needed
+  ; Scale MVOLL
+  lda @SPC_DSP_REGS+$0C
+  bmi music_scale_right        ; negative value: leave as-is
+  beq music_scale_right        ; zero: leave as-is
+  sta $4202                    ; multiplicand = current MVOLL
+  lda @CFG_MENU_MUSIC_VOLUME
+  sta $4203                    ; multiplier = volume%; triggers 8x8 multiply
+  phd : pld                    ; 9 master cycle delay (>=8 required)
+  rep #$20 : .al
+  lda $4216                    ; 16-bit product (RDMPYL/RDMPYH)
+  sta $4204                    ; 16-bit dividend (WRDIVL/WRDIVH)
+  sep #$20 : .as
+  lda #100
+  sta $4206                    ; divisor=100; triggers 16/8 divide
+  phd : pld                    ; 18 master cycle delay (>=16 required)
+  phd : pld
+  lda $4214                    ; quotient = scaled MVOLL
+  sta @SPC_DSP_REGS+$0C
+music_scale_right:
+  ; Scale MVOLR
+  lda @SPC_DSP_REGS+$1C
+  bmi music_scale_done
+  beq music_scale_done
+  sta $4202
+  lda @CFG_MENU_MUSIC_VOLUME
+  sta $4203
+  phd : pld
+  rep #$20 : .al
+  lda $4216
+  sta $4204
+  sep #$20 : .as
+  lda #100
+  sta $4206
+  phd : pld
+  phd : pld
+  lda $4214
+  sta @SPC_DSP_REGS+$1C
+music_scale_done:
+  plp
+  rts
+
+;---------------------------------------
+; Start SPC file as background music (no UI, loops internally).
+; Called during cold/warm boot if CFG_MENU_MUSIC_ENABLED is set.
+; Asks MCU to load CFG.menu_music_file into SRAM, verifies header,
+; scales volume, then uploads to SPC700 (which loops forever).
+music_start_background:
+  php
+  sep #$20 : .as : rep #$10 : .xl
+  lda @CFG_MENU_MUSIC_ENABLED
+  beq music_bg_exit            ; disabled: skip
+  lda #CMD_LOAD_MENU_MUSIC
+  sta @MCU_CMD                 ; ask MCU to load the SPC file
+music_bg_wait:
+  lda @MCU_CMD
+  bne music_bg_wait            ; wait until MCU clears the command
+  ldx #$0a                     ; check first 11 bytes of SPC header
+music_bg_hdr_loop:
+  lda @SPC_HEADER,x
+  cmp @text_spcid,x
+  bne music_bg_exit            ; header mismatch: no valid SPC in SRAM
+  dex
+  bne music_bg_hdr_loop
+  jsr music_scale_dsp_mvol     ; pre-patch master volume in SRAM
+  jsr spc700_load              ; upload SPC700 state, starts playback
+music_bg_exit:
+  plp
+  rts

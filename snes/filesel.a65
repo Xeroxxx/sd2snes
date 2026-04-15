@@ -833,6 +833,24 @@ ctx_is_parent
 ctx_is_dir
   bra open_context_menu_cont
 ctx_is_spc
+; "save" selected file path to MCU_PARAM in case we need to send it there later
+  dey
+  rep #$20 : .al
+  lda [dirptr_addr], y
+  and #$00ff
+  sta @MCU_PARAM+6
+  dey
+  dey
+  lda [dirptr_addr], y
+  sta @MCU_PARAM+4
+  lda #!FILESEL_CWD
+  sta @MCU_PARAM
+  sep #$20 : .as
+  lda #^FILESEL_CWD
+  sta @MCU_PARAM+2
+  lda #$00
+  sta @MCU_PARAM+3
+  jsr filesel_contextmenu_spc
   bra open_context_menu_cont
 
 add_selected_file_to_favorites:
@@ -1171,6 +1189,37 @@ set_favorite_as_autoboot_rom:
   lda #$00
   sta @SNES_CMD
   lda #CMD_SET_AUTOBOOT_FAV
+  sta @MCU_CMD
+; wait for ACK/NACK
+- lda @SNES_CMD
+  cmp #$55
+; success
+  beq +
+  cmp #$aa
+; failure
+  beq +
+  bra -
++ lda #$55
+  sta @MCU_CMD
+  jsr pop_window
+  plb
+  plp
+  rtl
+
+set_as_menu_music:
+; have MCU save the currently selected SPC file as the menu background music
+; the file path should already have been saved to MCU_PARAM before calling
+; this routine (done by open_context_menu / ctx_is_spc)
+  php
+  phb
+  sep #$20 : .as
+  lda #$01
+  jsr hide_cursor
+  jsr draw_loading_window
+  jsr waitblank
+  lda #$00
+  sta @SNES_CMD
+  lda #CMD_SET_MENU_MUSIC
   sta @MCU_CMD
 ; wait for ACK/NACK
 - lda @SNES_CMD
