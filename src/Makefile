@@ -108,11 +108,13 @@ OPT = s
 # Debugging format.
 DEBUG = dwarf-2
 
+
 # List any extra directories to look for include files here.
 #     Each directory must be seperated by a space.
 #     Use forward slashes for directory separators.
 #     For a directory that has spaces, enclose it in quotes.
 EXTRAINCDIRS =
+
 
 # Compiler flag to set the C Standard level.
 #     c89   = "ANSI" C
@@ -121,11 +123,14 @@ EXTRAINCDIRS =
 #     gnu99 = c99 plus GCC extensions
 CSTANDARD = -std=gnu99
 
+
 # Place -D or -U options here
 CDEFS = -DF_OSC=$(CONFIG_MCU_FOSC)UL
 
+
 # Place -I options here
 CINCS = -Iinclude
+
 
 # CPU-specific flags
 ifndef CPUFLAGS
@@ -168,6 +173,7 @@ CFLAGS += $(patsubst %,-I%,$(EXTRAINCDIRS))
 CFLAGS += $(CSTANDARD)
 CFLAGS += -ffunction-sections -fdata-sections
 
+
 #---------------- Assembler Options ----------------
 #  -Wa,...:   tell GCC to pass this to the assembler.
 #  -ahlms:    create listing
@@ -176,6 +182,7 @@ CFLAGS += -ffunction-sections -fdata-sections
 #             and function names needs to be present in the assembler source
 #             files -- see avr-libc docs [FIXME: not yet described there]
 ASFLAGS = $(CPUFLAGS) -Wa,-adhlns=$(OBJDIR)/$(<:.S=.lst),-gstabs -I$(OBJDIR)
+
 
 #---------------- Linker Options ----------------
 #  -Wl,...:     tell GCC to pass this to linker.
@@ -195,6 +202,7 @@ OPENOCDFLAGS = -s $(CONFIG_OPENOCD_SCRIPT_PATH) -f openocd.cfg
 
 #============================================================================
 
+
 # De-dupe the list of C source files
 CSRC := $(sort $(SRC))
 
@@ -210,10 +218,12 @@ OBJDIRS := $(sort $(dir $(OBJ)))
 # Compiler flags to generate dependency files.
 GENDEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 
+
 # Combine all necessary flags and optional flags.
 # Add target processor to flags.
 ALL_CFLAGS = -I. $(CFLAGS) $(GENDEPFLAGS)
 ALL_ASFLAGS = -I. -x assembler-with-cpp $(ASFLAGS) $(CDEFS)
+
 
 # Default target.
 all: build
@@ -289,6 +299,7 @@ $(OBJDIR)/%.sym: $(OBJDIR)/%.elf
 	$(E) "  SYM    $<"
 	$(E)$(NM) -n $< > $@
 
+
 # Link: create ELF output file from object files.
 .SECONDARY : $(TARGET)-intermediate.elf
 .PRECIOUS : $(OBJ)
@@ -316,9 +327,11 @@ $(OBJDIR)/%.o : %.c | $(OBJDIRS) $(OBJDIR)/autoconf.h $(OBJDIR)/cfgware.h $(OBJD
 	$(E) "  CC     $<"
 	$(Q)$(CC) -c $(ALL_CFLAGS) $< -o $@
 
+
 # Compile: create assembler files from C source files.
 $(OBJDIR)/%.s : %.c | $(OBJDIR) $(OBJDIR)/autoconf.h $(OBJDIR)/cfgware.h $(OBJDIR)/version.h
 	$(CC) -S $(ALL_CFLAGS) $< -o $@
+
 
 # Assemble: create object files from assembler source files.
 $(OBJDIR)/%.o : %.S | $(OBJDIRS) $(OBJDIR)/autoconf.h
