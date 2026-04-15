@@ -52,7 +52,8 @@ cfg_t CFG_DEFAULT = {
   .enable_autosave_msu1 = 1,
   .menu_music_enabled = 0,
   .menu_music_volume = 100,
-  .menu_music_file = "";
+  .menu_music_file = {0},
+};
 
 cfg_t CFG;
 extern mcu_status_t STM;
