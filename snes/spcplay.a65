@@ -687,6 +687,9 @@ exec_instr:
 ; Patches the values in SRAM (SPC_DSP_REGS) in-place.
 music_scale_dsp_mvol:
   php
+  phb                          ; save and set DBR=$00 so $4202/$4206 etc.
+  lda #$00                     ; reach hardware registers (banks $00-$3F only)
+  pha : plb
   sep #$20 : .as
   lda @CFG_MENU_MUSIC_VOLUME
   cmp #100
@@ -695,19 +698,19 @@ music_scale_dsp_mvol:
   lda @SPC_DSP_REGS+$0C
   bmi music_scale_right        ; negative value: leave as-is
   beq music_scale_right        ; zero: leave as-is
-  sta $4202                    ; multiplicand = current MVOLL
+  sta $4202                    ; WRMPYA = current MVOLL
   lda @CFG_MENU_MUSIC_VOLUME
-  sta $4203                    ; multiplier = volume%; triggers 8x8 multiply
+  sta $4203                    ; WRMPYB = volume%; triggers 8x8 multiply
   phd : pld                    ; 9 master cycle delay (>=8 required)
   rep #$20 : .al
-  lda $4216                    ; 16-bit product (RDMPYL/RDMPYH)
-  sta $4204                    ; 16-bit dividend (WRDIVL/WRDIVH)
+  lda $4216                    ; RDMPYL/H = 16-bit product
+  sta $4204                    ; WRDIVL/H = 16-bit dividend
   sep #$20 : .as
   lda #100
-  sta $4206                    ; divisor=100; triggers 16/8 divide
+  sta $4206                    ; WRDIVB = 100; triggers 16/8 divide
   phd : pld                    ; 18 master cycle delay (>=16 required)
   phd : pld
-  lda $4214                    ; quotient = scaled MVOLL
+  lda $4214                    ; RDDIVL = quotient = scaled MVOLL
   sta @SPC_DSP_REGS+$0C
 music_scale_right:
   ; Scale MVOLR
@@ -729,6 +732,7 @@ music_scale_right:
   lda $4214
   sta @SPC_DSP_REGS+$1C
 music_scale_done:
+  plb
   plp
   rts
 
@@ -740,8 +744,20 @@ music_scale_done:
 music_start_background:
   php
   sep #$20 : .as : rep #$10 : .xl
+  ; check suppress-next flag (set by select_spc when music was playing)
+  lda music_skip_restart
+  beq +
+  stz music_skip_restart       ; clear flag: only skip this one call
+  bra music_bg_exit
++
   lda @CFG_MENU_MUSIC_ENABLED
-  beq music_bg_exit            ; disabled: skip
+  beq music_bg_exit            ; 0 (Off): skip
+  cmp #2
+  bne music_bg_load            ; 1 (Always): play on any boot
+  ; 2 (Cold): play only when is_coldboot=1
+  lda is_coldboot
+  beq music_bg_exit            ; warmboot in Cold mode: skip
+music_bg_load:
   lda #CMD_LOAD_MENU_MUSIC
   sta @MCU_CMD                 ; ask MCU to load the SPC file
 music_bg_wait:
@@ -756,6 +772,8 @@ music_bg_hdr_loop:
   bne music_bg_hdr_loop
   jsr music_scale_dsp_mvol     ; pre-patch master volume in SRAM
   jsr spc700_load              ; upload SPC700 state, starts playback
+  lda #$01
+  sta music_is_playing         ; flag: SPC700 is now running background music
 music_bg_exit:
   plp
   rts

@@ -769,6 +769,32 @@ select_spc:
   sta @MCU_PARAM+2
   lda #$00
   sta @MCU_PARAM+3
+; If background music is playing the SPC700 is running user code and
+; will not respond to the IPL handshake.  Do a hardware reset first
+; (like spc_key_b) so apu_ram_init in warmboot puts SPC700 back in
+; IPL state.  MCU_PARAM is in FPGA SRAM and survives warmboot, so
+; the user just re-selects the SPC file after the brief reset.
+  lda music_is_playing
+  beq select_spc_go
+  stz music_is_playing         ; clear in snapshot: no music_is_playing after warmboot
+  lda #$01
+  sta music_skip_restart       ; tell music_start_background to skip this warmboot
+  jsr backup_wram              ; snapshot WRAM (captures the two flags above)
+  php                          ; push P (warmboot's plp will pop this)
+  rep #$20 : .al
+  tsc
+  sta @SAVED_SP                ; save SP for warmboot restoration
+  lda #$fa50
+  sta @WARM_SIGNATURE
+  eor #$ffff
+  sta @WARM_COMPLEMENT
+  sep #$20 : .as
+  sei
+  stz $2100
+  lda #CMD_RESET
+  sta @MCU_CMD
+- bra -                        ; wait for hardware reset by MCU
+select_spc_go:
   lda #CMD_LOADSPC
   sta @MCU_CMD
 wait_spc:

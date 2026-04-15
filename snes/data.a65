@@ -94,6 +94,9 @@ listdisp        .word 0 ; number of displayable list entries
 
 ;-misc
 testvar         .word 0,0,0,0
+music_is_playing .byt 0       ; 1 = SPC700 is running background music
+is_coldboot      .byt 0       ; 1 = current boot is a cold boot (set in main.a65)
+music_skip_restart .byt 0     ; 1 = skip music on next music_start_background call
 ;menu system
 listsel_sel         .byt 0
 listsel_step        .byt 0

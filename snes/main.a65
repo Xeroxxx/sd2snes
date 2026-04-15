@@ -60,6 +60,7 @@ GAME_MAIN:
   sta tgt_bright
   sta menu_brightness
   sta $2100
+  stz is_coldboot              ; warmboot: Cold mode must skip
   jsr music_start_background
   jmp @set_bank ; Set bios bank, just to be sure
 set_bank:
@@ -110,6 +111,8 @@ autoboot_start_poll:
 coldboot_bypass_autoboot:         ; clear autoboot flag, continue to menu
   jsr clr_autoboot_at_boot
 coldboot_autoboot_out:
+  lda #$01
+  sta is_coldboot              ; coldboot: Cold mode must play
   jsr music_start_background
   jsr screen_on
   jsr filesel_init

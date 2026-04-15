@@ -260,7 +260,7 @@ mdesc_browser_screensaver_timeout .byt "Set time after which to fade the screen"
 mdesc_browser_ledbright           .byt "Change brightness of LEDs", 0
 mtext_browser_menu_music          .byt "Menu Music", 0
 mtext_browser_music_volume        .byt "Music Volume", 0
-mdesc_browser_menu_music          .byt "Play an SPC file as background menu music", 0
+mdesc_browser_menu_music          .byt "On=always cold+warm, Cold=coldboot only, Off=disabled", 0
 mdesc_browser_music_volume        .byt "Set background menu music volume (0-100)", 0
 mdesc_ingame_cheats               .byt "Whether to start out with cheats enabled. Can be changed using in-game buttons", 0
 mdesc_ingame_shortreset           .byt "Go back to menu on short reset if enabled", 0
@@ -319,6 +319,7 @@ text_on_p1      .byt "On: P1", 0
 text_on_p2      .byt "On: P2", 0
 text_on         .byt "On", 0
 text_off        .byt "Off", 0
+text_cold       .byt "Cold", 0
 text_enabled    .byt "Enabled", 0
 text_disabled   .byt "Disabled", 0
 text_normal     .byt "Normal", 0

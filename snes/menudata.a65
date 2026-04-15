@@ -346,8 +346,8 @@ menu_enttab_browser:
  .byt  MTYPE_VALUE
  .word !mtext_browser_menu_music
  .byt  ^mtext_browser_menu_music
- .word !kv_onoff
- .byt  ^kv_onoff
+ .word !kv_music_mode
+ .byt  ^kv_music_mode
  .byt  OPTTYPE_KVBYTE
  .word !CFG_MENU_MUSIC_ENABLED
  .byt  ^CFG_MENU_MUSIC_ENABLED
@@ -945,9 +945,12 @@ mfunc_isenabled_autosave:
   rtl
 
 mfunc_isenabled_menu_music:
+  sep #$20 : .as
   lda @CFG_MENU_MUSIC_ENABLED
-  eor #$ff
-  ror
+  beq +
+  clc                          ; non-zero (Always/Cold): volume slider enabled
+  rtl
++ sec                          ; zero (Off): volume slider disabled
   rtl
 
 mfunc_chg_brightness:
@@ -971,6 +974,12 @@ kv_bsx_timesource:
 kv_onoff:
 .word $0000, !text_off : .byt ^text_off
 .word $0001, !text_on : .byt ^text_on
+.word $ffff
+
+kv_music_mode:
+.word $0000, !text_off : .byt ^text_off
+.word $0001, !text_on : .byt ^text_on
+.word $0002, !text_cold : .byt ^text_cold
 .word $ffff
 
 kv_enabledisable:
