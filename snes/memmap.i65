@@ -84,6 +84,8 @@
 #define CMD_SET_AUTOBOOT_FAV        $16 /* set autoboot from favorites (index in MCU_PARAM) */
 #define CMD_CLR_AUTOBOOT_ROM        $17 /* clear autoboot ROM setting */
 #define CMD_LOAD_AUTOBOOT           $18 /* trigger autoboot at cold boot */
+#define CMD_DELETE_FILE             $19 /* delete selected file */
+#define CMD_DELETE_SRM              $1a /* delete SRM save file for selected ROM */
 #define CMD_SAVESTATE               $40
 #define CMD_LOADSTATE               $41
 #define CMD_MCU_RDY                 $55

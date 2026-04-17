@@ -294,6 +294,12 @@ mdesc_filesel_context_add_to_favorites .byt "Add the selected file to favorites"
 text_filesel_context_set_as_autoboot .byt "Set as autoboot", 0
 mdesc_filesel_context_set_as_autoboot .byt "Boot this ROM automatically on next power-on (hold START to cancel)", 0
 
+text_filesel_context_delete_file .byt "Delete", 0
+mdesc_filesel_context_delete_file .byt "Delete the selected file", 0
+
+text_filesel_context_delete_srm .byt "Delete save file", 0
+mdesc_filesel_context_delete_srm .byt "Delete the SRM save file for this ROM", 0
+
 text_filesel_favorites_context_remove_from_favorites .byt "Remove from favorites", 0
 mdesc_filesel_favorites_context_remove_from_favorites .byt "Remove the selected file from favorites", 0
 
